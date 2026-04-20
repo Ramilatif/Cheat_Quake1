@@ -1,0 +1,15 @@
+[package]
+name = "memory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "External process memory access for the Quake III cheat"
+
+[dependencies]
+thiserror.workspace = true
+windows.workspace = true
+
+[[bin]]
+name = "find-process"
+path = "src/bin/find_process.rs"

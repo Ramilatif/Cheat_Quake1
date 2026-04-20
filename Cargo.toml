@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/memory"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+authors = ["Rami"]
+license = "MIT"
+repository = "https://github.com/Ramilatif/Cheat_Quake1"
+
+[workspace.dependencies]
+thiserror = "1.0"
+windows = { version = "0.58", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
