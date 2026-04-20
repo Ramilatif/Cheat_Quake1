@@ -1,0 +1,13 @@
+{
+  "module": "ioquake3.x86_64.exe",
+  "notes": "RVAs (relative virtual addresses) from the module base. Resolve at runtime as `process.base_address + rva`. Valid as long as the engine binary is not recompiled.",
+  "offsets": {
+    "player_health": {
+      "rva": "0x7B40B8",
+      "type": "i32",
+      "description": "Local player HP. Matches the HUD value in real time.",
+      "found_on": "2026-04-20",
+      "found_via": "Cheat Engine: scan 4 Bytes exact value, narrowed by taking damage, confirmed by watching value track the HUD."
+    }
+  }
+}

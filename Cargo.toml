@@ -11,10 +11,13 @@ license = "MIT"
 repository = "https://github.com/Ramilatif/Cheat_Quake1"
 
 [workspace.dependencies]
+bytemuck = { version = "1.16", features = ["derive"] }
 thiserror = "1.0"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
+    "Win32_System_Diagnostics_Debug",
     "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
 ] }
