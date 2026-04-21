@@ -1,0 +1,10 @@
+[package]
+name = "sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Quake III Arena SDK: repr(C) mirrors of engine structs"
+
+[dependencies]
+bytemuck.workspace = true
