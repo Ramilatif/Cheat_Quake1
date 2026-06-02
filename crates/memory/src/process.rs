@@ -11,8 +11,8 @@ use std::os::windows::ffi::OsStringExt;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
 use windows::Win32::System::Diagnostics::ToolHelp::{
-    CreateToolhelp32Snapshot, Module32FirstW, Process32FirstW, Process32NextW, MODULEENTRY32W,
-    PROCESSENTRY32W, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
+    CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW, Process32NextW,
+    MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE, TH32CS_SNAPMODULE32, TH32CS_SNAPPROCESS,
 };
 
 /// Information about a running process matched by name.
@@ -83,6 +83,49 @@ pub fn find_by_name(target_name: &str) -> Result<Process, ProcessError> {
             }
         }
     }
+}
+
+/// A single loaded module (the `.exe` or any of its `.dll` dependencies).
+#[derive(Debug, Clone)]
+pub struct Module {
+    /// File name, e.g. `cgamex86_64.dll`.
+    pub name: String,
+    /// Base virtual address in the target process's address space.
+    pub base_address: usize,
+    /// Size in bytes of the module's mapped image.
+    pub size: usize,
+}
+
+/// Enumerate every module loaded in `pid` (main `.exe` plus all DLLs).
+///
+/// This is the entry point for scans that need to target a *specific* DLL —
+/// e.g. Quake III's `cg_entities[]` lives in the `.bss` of `cgamex86_64.dll`,
+/// not in the main executable.
+pub fn list_modules(pid: u32) -> Result<Vec<Module>, ProcessError> {
+    let snapshot = Snapshot::new(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid)?;
+
+    let mut entry = MODULEENTRY32W {
+        dwSize: core::mem::size_of::<MODULEENTRY32W>() as u32,
+        ..Default::default()
+    };
+
+    let mut out = Vec::new();
+    unsafe {
+        if Module32FirstW(snapshot.handle, &mut entry).is_err() {
+            return Ok(out);
+        }
+        loop {
+            out.push(Module {
+                name: wide_to_string(&entry.szModule),
+                base_address: entry.modBaseAddr as usize,
+                size: entry.modBaseSize as usize,
+            });
+            if Module32NextW(snapshot.handle, &mut entry).is_err() {
+                break;
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Read the first module (== main executable) of `pid` and return its base

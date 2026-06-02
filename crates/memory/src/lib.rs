@@ -19,4 +19,4 @@ pub mod handle;
 pub mod process;
 
 pub use handle::{ProcessHandle, ReadError};
-pub use process::{find_by_name, Process, ProcessError};
+pub use process::{find_by_name, list_modules, Module, Process, ProcessError};
