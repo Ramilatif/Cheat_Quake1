@@ -104,6 +104,13 @@ nothing reads garbage at runtime. The same values are recorded in
 [offsets.json](offsets.json) as a single source of truth that can be
 consulted without running the build.
 
+## Writeup
+
+A walkthrough of the reverse-engineering work — how `dump-snapshot`
+was built, the dead ends along the way, and why client-side ESP in
+Quake III is PVS-bounded by construction — lives in
+[docs/reverse-engineering.md](docs/reverse-engineering.md).
+
 ## References
 
 - [ioquake3 source](https://github.com/ioquake/ioq3) — `code/qcommon/q_shared.h`, `code/cgame/cg_public.h`, `code/client/client.h`
