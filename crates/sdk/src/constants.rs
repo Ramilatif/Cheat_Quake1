@@ -26,3 +26,10 @@ pub const MAX_WEAPONS: usize = 16;
 
 /// Events batched into a single `playerState_t` snapshot.
 pub const MAX_PS_EVENTS: usize = 2;
+
+/// Bytes in the area-visibility bit vector carried by every snapshot.
+pub const MAX_MAP_AREA_BYTES: usize = 32;
+
+/// Maximum entities transmitted in a single `snapshot_t`. Defines the
+/// upper bound on the per-frame entity list we iterate for ESP.
+pub const MAX_ENTITIES_IN_SNAPSHOT: usize = 256;
