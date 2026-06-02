@@ -1,13 +1,245 @@
 {
-  "module": "ioquake3.x86_64.exe",
-  "notes": "RVAs (relative virtual addresses) from the module base. Resolve at runtime as `process.base_address + rva`. Valid as long as the engine binary is not recompiled.",
-  "offsets": {
-    "player_health": {
+  "target": {
+    "module": "ioquake3.x86_64.exe",
+    "platform": "windows-x86_64",
+    "module_base_default": "0x0000000000400000",
+    "module_size_observed_kib": 28960,
+    "cgame_mode": "qvm",
+    "notes": [
+      "ioquake3 master build, native engine + cgame.qvm interpreter (no cgamex86_64.dll observed in the module list).",
+      "Engine globals (clientActive_t cl, struct cls...) live in the .bss of the .exe at fixed RVAs.",
+      "Cgame globals (cg_t cg, cg_entities[...]) live in the QVM heap — addresses are runtime-dynamic and must be located by signature scan, not hardcoded."
+    ]
+  },
+
+  "engine_rvas": {
+    "_comment": "RVAs are relative to the .exe module base. Static across runs as long as the engine binary isn't rebuilt.",
+    "cl_snap_ps_stat_health": {
       "rva": "0x7B40B8",
       "type": "i32",
-      "description": "Local player HP. Matches the HUD value in real time.",
+      "description": "cl.snap.ps.stats[STAT_HEALTH] — engine-side copy of the local player HP. Matches the HUD in real time.",
       "found_on": "2026-04-20",
       "found_via": "Cheat Engine: scan 4 Bytes exact value, narrowed by taking damage, confirmed by watching value track the HUD."
+    }
+  },
+
+  "runtime_addresses": {
+    "_comment": "Heap-resident structures. Addresses change per run; recover via signature scan. Documented here for reference, not as constants.",
+    "cg_activeSnapshots": {
+      "scanner": "memory --bin dump-snapshot",
+      "signature": "Two SnapshotHeader candidates separated by exactly sizeof(snapshot_t) = 53772 bytes.",
+      "observed_window": "0x0000000005000000..0x0000000009000000",
+      "session_example_2026_06_02": [
+        "0x00000000067FBE88",
+        "0x0000000006809094"
+      ]
+    },
+    "parseEntities_buffer": {
+      "scanner": "memory --bin scan-entities",
+      "signature": "208-byte stride contiguous block, ~1.6 MiB (8192 entityState_t entries).",
+      "note": "Lives inside cg.activeSnapshots[N].entities[] — not the engine's cl.parseEntities[] (which would be in the .exe .bss)."
+    }
+  },
+
+  "constants": {
+    "MAX_CLIENTS": 64,
+    "MAX_GENTITIES": 1024,
+    "MAX_ENTITIES_IN_SNAPSHOT": 256,
+    "MAX_PARSE_ENTITIES": 8192,
+    "PACKET_BACKUP": 32,
+    "MAX_SNAPSHOT_ENTITIES": 256,
+    "MAX_STATS": 16,
+    "MAX_PERSISTANT": 16,
+    "MAX_POWERUPS": 16,
+    "MAX_WEAPONS": 16,
+    "MAX_PS_EVENTS": 2,
+    "MAX_MAP_AREA_BYTES": 32,
+    "MAX_QPATH": 64,
+    "ENTITYNUM_NONE": 1023,
+    "STAT_HEALTH": 0,
+    "STAT_ARMOR": 3,
+    "STAT_MAX_HEALTH": 6
+  },
+
+  "struct_layouts": {
+    "_comment": "Field offsets and sizes for x86_64. Derived from ioquake3 master and validated at compile time by assert_eq! in crates/sdk.",
+
+    "vec3_t": {
+      "size": 12,
+      "align": 4,
+      "fields": { "x": 0, "y": 4, "z": 8 }
+    },
+
+    "trajectory_t": {
+      "size": 36,
+      "align": 4,
+      "fields": {
+        "trType": 0,
+        "trTime": 4,
+        "trDuration": 8,
+        "trBase": 12,
+        "trDelta": 24
+      },
+      "trType_values": {
+        "TR_STATIONARY": 0,
+        "TR_INTERPOLATE": 1,
+        "TR_LINEAR": 2,
+        "TR_LINEAR_STOP": 3,
+        "TR_SINE": 4,
+        "TR_GRAVITY": 5
+      }
+    },
+
+    "entityState_t": {
+      "size": 208,
+      "align": 4,
+      "fields": {
+        "number": 0,
+        "eType": 4,
+        "eFlags": 8,
+        "pos": 12,
+        "apos": 48,
+        "time": 84,
+        "time2": 88,
+        "origin": 92,
+        "origin2": 104,
+        "angles": 116,
+        "angles2": 128,
+        "otherEntityNum": 140,
+        "otherEntityNum2": 144,
+        "groundEntityNum": 148,
+        "constantLight": 152,
+        "loopSound": 156,
+        "modelindex": 160,
+        "modelindex2": 164,
+        "clientNum": 168,
+        "frame": 172,
+        "solid": 176,
+        "event": 180,
+        "eventParm": 184,
+        "powerups": 188,
+        "weapon": 192,
+        "legsAnim": 196,
+        "torsoAnim": 200,
+        "generic1": 204
+      },
+      "eType_values": {
+        "ET_GENERAL": 0,
+        "ET_PLAYER": 1,
+        "ET_ITEM": 2,
+        "ET_MISSILE": 3,
+        "ET_MOVER": 4,
+        "ET_BEAM": 5,
+        "ET_PORTAL": 6,
+        "ET_SPEAKER": 7,
+        "ET_PUSH_TRIGGER": 8,
+        "ET_TELEPORT_TRIGGER": 9,
+        "ET_INVISIBLE": 10,
+        "ET_GRAPPLE": 11,
+        "ET_TEAM": 12
+      },
+      "notes": [
+        "For ET_PLAYER entities with pos.trType == TR_INTERPOLATE, the canonical position is in pos.trBase, NOT in origin.",
+        "The .origin field is left zeroed for interpolated entities — the client recomputes it from two consecutive snapshots."
+      ]
+    },
+
+    "playerState_t": {
+      "size": 468,
+      "align": 4,
+      "fields": {
+        "commandTime": 0,
+        "pm_type": 4,
+        "bobCycle": 8,
+        "pm_flags": 12,
+        "pm_time": 16,
+        "origin": 20,
+        "velocity": 32,
+        "weaponTime": 44,
+        "gravity": 48,
+        "speed": 52,
+        "delta_angles": 56,
+        "groundEntityNum": 68,
+        "legsTimer": 72,
+        "legsAnim": 76,
+        "torsoTimer": 80,
+        "torsoAnim": 84,
+        "movementDir": 88,
+        "grapplePoint": 92,
+        "eFlags": 104,
+        "eventSequence": 108,
+        "events": 112,
+        "eventParms": 120,
+        "externalEvent": 128,
+        "externalEventParm": 132,
+        "externalEventTime": 136,
+        "clientNum": 140,
+        "weapon": 144,
+        "weaponstate": 148,
+        "viewangles": 152,
+        "viewheight": 164,
+        "damageEvent": 168,
+        "damageYaw": 172,
+        "damagePitch": 176,
+        "damageCount": 180,
+        "stats": 184,
+        "persistant": 248,
+        "powerups": 312,
+        "ammo": 376,
+        "generic1": 440,
+        "loopSound": 444,
+        "jumppad_ent": 448,
+        "ping": 452,
+        "pmove_framecount": 456,
+        "jumppad_frame": 460,
+        "entityEventSequence": 464
+      },
+      "pm_type_values": {
+        "PM_NORMAL": 0,
+        "PM_NOCLIP": 1,
+        "PM_SPECTATOR": 2,
+        "PM_DEAD": 3,
+        "PM_FREEZE": 4,
+        "PM_INTERMISSION": 5,
+        "PM_SPINTERMISSION": 6
+      }
+    },
+
+    "snapshot_t": {
+      "size": 53772,
+      "align": 4,
+      "_comment": "Cgame-side snapshot (cg.snap points at one of cg.activeSnapshots[2]). Engine-side is clSnapshot_t (540 bytes), different layout.",
+      "fields": {
+        "snapFlags": 0,
+        "ping": 4,
+        "serverTime": 8,
+        "areamask": 12,
+        "ps": 44,
+        "numEntities": 512,
+        "entities": 516,
+        "numServerCommands": 53764,
+        "serverCommandSequence": 53768
+      }
+    },
+
+    "clSnapshot_t": {
+      "size": 540,
+      "align": 4,
+      "_comment": "Engine-side snapshot, embedded in clientActive_t cl.snap. Used by cl.parseEntities[] ring-buffer indexing.",
+      "fields": {
+        "valid": 0,
+        "snapFlags": 4,
+        "serverTime": 8,
+        "messageNum": 12,
+        "deltaNum": 16,
+        "ping": 20,
+        "areamask": 24,
+        "cmdNum": 56,
+        "ps": 60,
+        "numEntities": 528,
+        "parseEntitiesNum": 532,
+        "serverCommandNum": 536
+      }
     }
   }
 }

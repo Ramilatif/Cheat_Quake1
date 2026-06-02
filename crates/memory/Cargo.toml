@@ -8,6 +8,7 @@ description = "External process memory access for the Quake III cheat"
 
 [dependencies]
 bytemuck.workspace = true
+sdk = { path = "../sdk" }
 thiserror.workspace = true
 windows.workspace = true
 
@@ -18,3 +19,23 @@ path = "src/bin/find_process.rs"
 [[bin]]
 name = "read-hp"
 path = "src/bin/read_hp.rs"
+
+[[bin]]
+name = "inspect-entity"
+path = "src/bin/inspect_entity.rs"
+
+[[bin]]
+name = "scan-entities"
+path = "src/bin/scan_entities.rs"
+
+[[bin]]
+name = "list-modules"
+path = "src/bin/list_modules.rs"
+
+[[bin]]
+name = "dump-players"
+path = "src/bin/dump_players.rs"
+
+[[bin]]
+name = "dump-snapshot"
+path = "src/bin/dump_snapshot.rs"
