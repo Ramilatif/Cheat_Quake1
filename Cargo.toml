@@ -11,7 +11,9 @@ license = "MIT"
 repository = "https://github.com/Ramilatif/Cheat_Quake1"
 
 [workspace.dependencies]
+anyhow = "1.0"
 bytemuck = { version = "1.16", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
 thiserror = "1.0"
 windows = { version = "0.58", features = [
     "Win32_Foundation",

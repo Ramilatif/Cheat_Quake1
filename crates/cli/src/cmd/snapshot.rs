@@ -1,82 +1,51 @@
-//! Locate the active cgame `snapshot_t` in the target's heap and dump
-//! the local player plus every visible entity for the current frame.
-//!
-//! Why not just brute-scan for player-shaped bytes like `dump_players`?
-//! Because the engine keeps several stale copies of every entity around
-//! (ring buffers, baselines, double-buffered snapshots), and a brute
-//! scan can't tell which copy is the live one. The snapshot is what the
-//! engine itself renders from: read it, and you see exactly what the
-//! HUD sees, this frame, no aliasing.
-//!
-//! Strategy:
-//! 1. Walk the QVM heap window at 4-byte alignment.
-//! 2. At each offset reinterpret 516 bytes as a [`SnapshotHeader`] and
-//!    sanity-check: `ps.client_num` in `0..MAX_CLIENTS`, weapon sane,
-//!    `num_entities` in `0..=MAX_ENTITIES_IN_SNAPSHOT`, origin finite.
-//! 3. On a hit, read the next 53 KiB and iterate `entities[0..num_entities]`.
-//!
-//! We expect to find *two* snapshots (cg.activeSnapshots[2]) sitting
-//! ~54 KiB apart — that's a strong signal we found the right structure.
-//!
-//! Usage:
-//! ```text
-//! cargo run -p memory --bin dump-snapshot
-//! cargo run -p memory --bin dump-snapshot -- ioquake3.x86_64.exe
-//! cargo run -p memory --bin dump-snapshot -- ioquake3.x86_64.exe 0x06000000 0x02000000
-//! ```
+//! `qcheat snapshot` — locate cg.activeSnapshots and dump the active
+//! frame (local player + every visible entity).
 
-use std::process::ExitCode;
-
-use bytemuck::{from_bytes, Pod, Zeroable};
+use anyhow::{Context, Result};
+use bytemuck::{Pod, Zeroable};
+use clap::Args as ClapArgs;
 use sdk::{
-    EntityState, EntityType, PlayerState, Snapshot, SnapshotHeader,
-    MAX_CLIENTS, MAX_ENTITIES_IN_SNAPSHOT, STAT_ARMOR, STAT_HEALTH,
+    EntityState, EntityType, PlayerState, Snapshot, SnapshotHeader, MAX_CLIENTS,
+    MAX_ENTITIES_IN_SNAPSHOT, STAT_ARMOR, STAT_HEALTH,
 };
+
+use crate::util::{parse_hex, DEFAULT_PROCESS};
 
 /// Bytes per chunked read while scanning.
 const CHUNK: usize = 4096;
 /// Size of the snapshot fingerprint we evaluate at each offset.
 const HEADER_SIZE: usize = core::mem::size_of::<SnapshotHeader>();
 
-/// Default heap scan window (centre, half-range). The 32 MiB band around
-/// `0x07000000` covers the addresses where the cgame QVM allocates `cg`
-/// in our observed builds. Override on the command line if needed.
+/// Default heap scan window. The 32 MiB band around `0x07000000`
+/// covers the addresses where the cgame QVM allocates `cg` in our
+/// observed builds. Override with `--center` / `--range` if needed.
 const DEFAULT_CENTER: usize = 0x07000000;
 const DEFAULT_RANGE: usize = 0x02000000;
 
-fn main() -> ExitCode {
-    let mut args = std::env::args().skip(1);
-    let process_name = args
-        .next()
-        .unwrap_or_else(|| "ioquake3.x86_64.exe".to_string());
-    let center = args
-        .next()
-        .as_deref()
-        .map(parse_hex)
-        .unwrap_or(Some(DEFAULT_CENTER))
-        .unwrap_or(DEFAULT_CENTER);
-    let range = args
-        .next()
-        .as_deref()
-        .map(parse_hex)
-        .unwrap_or(Some(DEFAULT_RANGE))
-        .unwrap_or(DEFAULT_RANGE);
+/// Arguments accepted by `qcheat snapshot`.
+#[derive(ClapArgs)]
+pub struct Args {
+    /// Name of the target executable.
+    #[arg(long, default_value = DEFAULT_PROCESS)]
+    pub process: String,
 
-    let proc = match process::find_by_name(&process_name) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let handle = match process::ProcessHandle::open(proc.pid) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("error: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    /// Override the scan window centre (hex).
+    #[arg(long, value_parser = parse_hex)]
+    pub center: Option<usize>,
 
+    /// Override the scan window half-range (hex).
+    #[arg(long, value_parser = parse_hex)]
+    pub range: Option<usize>,
+}
+
+/// Locate `cg.activeSnapshots`, pick the active one by `serverTime`,
+/// then dump local player + visible entities.
+pub fn run(args: Args) -> Result<()> {
+    let proc = process::find_by_name(&args.process)?;
+    let handle = process::ProcessHandle::open(proc.pid)?;
+
+    let center = args.center.unwrap_or(DEFAULT_CENTER);
+    let range = args.range.unwrap_or(DEFAULT_RANGE);
     let start = center.saturating_sub(range);
     let end = center.saturating_add(range);
     println!(
@@ -91,17 +60,15 @@ fn main() -> ExitCode {
     let hits = find_snapshot_candidates(&handle, start, end);
     if hits.is_empty() {
         println!("No snapshot_t candidates found.");
-        println!("Tip: widen the range (3rd arg) or shift the center (2nd arg).");
-        println!("     The buffer 0x05F88040 found by scan-entities is *inside* a snapshot.");
-        return ExitCode::SUCCESS;
+        println!("Tip: widen the range or shift the center via --center / --range.");
+        return Ok(());
     }
 
     println!("Found {} snapshot candidate(s).", hits.len());
 
     // cg.activeSnapshots[2] sit exactly sizeof(snapshot_t) bytes apart.
     // That's our gold signal — if a pair matches that gap, we know we
-    // found the real engine buffer and not some lookalike (parseEntities
-    // entry, snapshots[PACKET_BACKUP] ring, …).
+    // found the real engine buffer.
     const SS_SIZE: usize = core::mem::size_of::<Snapshot>();
     let pair = hits
         .windows(2)
@@ -132,30 +99,30 @@ fn main() -> ExitCode {
         }
         None => {
             println!("\n=> No 53772-byte-spaced pair detected.");
-            println!("   Falling back to the first candidate; results may be a stale or bogus snapshot.");
+            println!(
+                "   Falling back to the first candidate; results may be stale or bogus."
+            );
             for (i, h) in hits.iter().enumerate().take(20) {
                 println!("   [{i}] 0x{h:016X}");
             }
             hits[0]
         }
     };
+
     println!("\nReading full snapshot at 0x{addr:016X}...\n");
-    let snap = match handle.read::<Snapshot>(addr) {
-        Ok(s) => Box::new(s),
-        Err(e) => {
-            eprintln!("read failed: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
+    let snap = Box::new(
+        handle
+            .read::<Snapshot>(addr)
+            .with_context(|| format!("reading Snapshot at 0x{addr:016X}"))?,
+    );
 
     print_local_player(&snap.header.ps);
     print_entities(&snap.entities, snap.header.num_entities);
-
-    ExitCode::SUCCESS
+    Ok(())
 }
 
-/// Walk the requested window and report addresses that look like a real
-/// `snapshot_t`.
+/// Walk the requested window and report addresses that look like a
+/// real `snapshot_t`.
 fn find_snapshot_candidates(
     handle: &process::ProcessHandle,
     start: usize,
@@ -173,7 +140,8 @@ fn find_snapshot_candidates(
         };
         let mut off = 0usize;
         while off + HEADER_SIZE <= buf.0.len() {
-            let header: &SnapshotHeader = from_bytes(&buf.0[off..off + HEADER_SIZE]);
+            let header: &SnapshotHeader =
+                bytemuck::from_bytes(&buf.0[off..off + HEADER_SIZE]);
             if looks_like_snapshot(header) {
                 hits.push(cursor + off);
                 // Skip past this snapshot — there can't be another one
@@ -190,16 +158,11 @@ fn find_snapshot_candidates(
 
 /// Sanity-filter a candidate `SnapshotHeader`. Strict enough that an
 /// all-zero block doesn't pass, loose enough that any real in-game
-/// frame does. Empty/uninitialised memory full of zeros would otherwise
-/// satisfy `num_entities == 0`, `client_num == 0`, etc. and produce a
-/// useless "hit".
+/// frame does.
 fn looks_like_snapshot(h: &SnapshotHeader) -> bool {
     if !(0..=MAX_ENTITIES_IN_SNAPSHOT as i32).contains(&h.num_entities) {
         return false;
     }
-    // Real snapshots have a serverTime in the tens of thousands at minimum
-    // (engine pumps ms steadily from connect). Tiny positive values are
-    // almost always noise that happens to look int-ish.
     if h.server_time < 1_000 {
         return false;
     }
@@ -228,11 +191,6 @@ fn looks_like_snapshot(h: &SnapshotHeader) -> bool {
         return false;
     }
 
-    // A real cg.snap is never fundamentally empty. At least one of
-    // origin / velocity / viewangles must carry a non-zero float, or
-    // HP must be positive. An all-zero playerState_t inside the engine
-    // means the snapshot hasn't been populated yet and we shouldn't
-    // claim it as "found".
     let origin_zero = o.x == 0.0 && o.y == 0.0 && o.z == 0.0;
     let velocity_zero =
         ps.velocity.x == 0.0 && ps.velocity.y == 0.0 && ps.velocity.z == 0.0;
@@ -241,13 +199,10 @@ fn looks_like_snapshot(h: &SnapshotHeader) -> bool {
     if origin_zero && velocity_zero && angles_zero && hp <= 0 {
         return false;
     }
-    // An alive PM_NORMAL player must have HP > 0 and a real position.
     const PM_NORMAL: i32 = 0;
     if ps.pm_type == PM_NORMAL && (hp <= 0 || origin_zero) {
         return false;
     }
-    // commandTime is the server tick that produced this snapshot.
-    // Always positive once we've executed at least one command.
     if ps.command_time <= 0 {
         return false;
     }
@@ -285,14 +240,10 @@ fn print_entities(entities: &[EntityState; MAX_ENTITIES_IN_SNAPSHOT], num: i32) 
     let n = num.clamp(0, MAX_ENTITIES_IN_SNAPSHOT as i32) as usize;
     println!("SNAPSHOT ENTITIES (num_entities = {n})");
 
-    let mut players = 0usize;
     let mut by_type = [0usize; 13];
     for es in &entities[..n] {
         if (0..13).contains(&es.e_type) {
             by_type[es.e_type as usize] += 1;
-        }
-        if es.e_type == EntityType::PLAYER {
-            players += 1;
         }
     }
     println!(
@@ -305,7 +256,7 @@ fn print_entities(entities: &[EntityState; MAX_ENTITIES_IN_SNAPSHOT], num: i32) 
         n - by_type.iter().sum::<usize>(),
     );
 
-    if players == 0 {
+    if by_type[EntityType::PLAYER as usize] == 0 {
         println!("  (no visible players this frame)");
         return;
     }
@@ -320,10 +271,6 @@ fn print_entities(entities: &[EntityState; MAX_ENTITIES_IN_SNAPSHOT], num: i32) 
         if es.e_type != EntityType::PLAYER {
             continue;
         }
-        // PLAYER entities use TR_INTERPOLATE: the engine writes the
-        // canonical position into pos.tr_base each snapshot and
-        // interpolates between two consecutive snapshots client-side.
-        // entityState_t.origin is left at zero for these.
         let p = es.pos.tr_base;
         println!(
             "  {:<5} {:<7} {:<7} {:<7} ({:>8.1}, {:>8.1}, {:>8.1})",
@@ -337,11 +284,6 @@ fn print_entities(entities: &[EntityState; MAX_ENTITIES_IN_SNAPSHOT], num: i32) 
 #[derive(Copy, Clone)]
 struct Chunk([u8; CHUNK + HEADER_SIZE]);
 
-// SAFETY: a byte array is trivially Pod.
+// SAFETY: a byte array is trivially Pod/Zeroable.
 unsafe impl Zeroable for Chunk {}
 unsafe impl Pod for Chunk {}
-
-fn parse_hex(s: &str) -> Option<usize> {
-    let stripped = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
-    usize::from_str_radix(stripped, 16).ok()
-}

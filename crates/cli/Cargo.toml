@@ -4,38 +4,16 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Command-line tools that drive the Cheat_Quake1 stack"
+description = "qcheat: command-line entry point for the Cheat_Quake1 toolkit"
 
 [dependencies]
+anyhow.workspace = true
 bytemuck.workspace = true
+clap.workspace = true
 process = { path = "../process" }
 scanner = { path = "../scanner" }
 sdk = { path = "../sdk" }
 
 [[bin]]
-name = "find-process"
-path = "src/bin/find_process.rs"
-
-[[bin]]
-name = "read-hp"
-path = "src/bin/read_hp.rs"
-
-[[bin]]
-name = "inspect-entity"
-path = "src/bin/inspect_entity.rs"
-
-[[bin]]
-name = "scan-entities"
-path = "src/bin/scan_entities.rs"
-
-[[bin]]
-name = "list-modules"
-path = "src/bin/list_modules.rs"
-
-[[bin]]
-name = "dump-players"
-path = "src/bin/dump_players.rs"
-
-[[bin]]
-name = "dump-snapshot"
-path = "src/bin/dump_snapshot.rs"
+name = "qcheat"
+path = "src/main.rs"
