@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         .nth(1)
         .unwrap_or_else(|| "quake3e.x64.exe".to_string());
 
-    match memory::find_by_name(&target) {
+    match process::find_by_name(&target) {
         Ok(p) => {
             println!("Found process:");
             println!("  name         : {}", p.name);

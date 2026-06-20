@@ -50,7 +50,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let proc = match memory::find_by_name(&process_name) {
+    let proc = match process::find_by_name(&process_name) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
@@ -59,7 +59,7 @@ fn main() -> ExitCode {
     };
     println!("Attached to {} (pid {})", proc.name, proc.pid);
 
-    let handle = match memory::ProcessHandle::open(proc.pid) {
+    let handle = match process::ProcessHandle::open(proc.pid) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("error: {e}");
@@ -86,7 +86,7 @@ fn main() -> ExitCode {
 }
 
 /// Read 12 bytes at `addr` as a [`Vec3`] and print.
-fn dump_vec3(handle: &memory::ProcessHandle, addr: usize) {
+fn dump_vec3(handle: &process::ProcessHandle, addr: usize) {
     match handle.read::<Vec3>(addr) {
         Ok(v) => println!("Vec3 @ 0x{addr:016X} = ({:.2}, {:.2}, {:.2})", v.x, v.y, v.z),
         Err(e) => eprintln!("read failed: {e}"),
@@ -96,7 +96,7 @@ fn dump_vec3(handle: &memory::ProcessHandle, addr: usize) {
 /// Read 208 bytes at `addr` as an [`EntityState`], print every field,
 /// and flag values that fall outside the sensible ranges so a bad guess
 /// is obvious at a glance.
-fn dump_entity(handle: &memory::ProcessHandle, addr: usize) {
+fn dump_entity(handle: &process::ProcessHandle, addr: usize) {
     let es: EntityState = match handle.read(addr) {
         Ok(v) => v,
         Err(e) => {

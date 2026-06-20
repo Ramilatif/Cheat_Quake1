@@ -34,7 +34,7 @@ fn main() -> ExitCode {
         }
     };
 
-    let proc = match memory::find_by_name(&process_name) {
+    let proc = match process::find_by_name(&process_name) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
@@ -44,7 +44,7 @@ fn main() -> ExitCode {
     println!("Attached to {} (pid {})", proc.name, proc.pid);
     println!("Reading i32 at 0x{address:016X} every 100ms. Ctrl+C to stop.\n");
 
-    let handle = match memory::ProcessHandle::open(proc.pid) {
+    let handle = match process::ProcessHandle::open(proc.pid) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("error: {e}");

@@ -24,7 +24,7 @@ fn main() -> ExitCode {
         .unwrap_or_else(|| "ioquake3.x86_64.exe".to_string());
     let filter = args.next().map(|s| s.to_ascii_lowercase());
 
-    let proc = match memory::find_by_name(&process_name) {
+    let proc = match process::find_by_name(&process_name) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
@@ -33,7 +33,7 @@ fn main() -> ExitCode {
     };
     println!("Attached to {} (pid {})\n", proc.name, proc.pid);
 
-    let modules = match memory::list_modules(proc.pid) {
+    let modules = match process::list_modules(proc.pid) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("error: {e}");

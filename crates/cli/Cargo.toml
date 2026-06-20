@@ -1,16 +1,16 @@
 [package]
-name = "memory"
+name = "cli"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "External process memory access for the Quake III cheat"
+description = "Command-line tools that drive the Cheat_Quake1 stack"
 
 [dependencies]
 bytemuck.workspace = true
+process = { path = "../process" }
+scanner = { path = "../scanner" }
 sdk = { path = "../sdk" }
-thiserror.workspace = true
-windows.workspace = true
 
 [[bin]]
 name = "find-process"

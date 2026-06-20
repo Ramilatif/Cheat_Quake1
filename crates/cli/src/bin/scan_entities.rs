@@ -65,14 +65,14 @@ fn main() -> ExitCode {
         }
     };
 
-    let proc = match memory::find_by_name(&process_name) {
+    let proc = match process::find_by_name(&process_name) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let handle = match memory::ProcessHandle::open(proc.pid) {
+    let handle = match process::ProcessHandle::open(proc.pid) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("error: {e}");

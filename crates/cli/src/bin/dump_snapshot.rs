@@ -62,14 +62,14 @@ fn main() -> ExitCode {
         .unwrap_or(Some(DEFAULT_RANGE))
         .unwrap_or(DEFAULT_RANGE);
 
-    let proc = match memory::find_by_name(&process_name) {
+    let proc = match process::find_by_name(&process_name) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("error: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let handle = match memory::ProcessHandle::open(proc.pid) {
+    let handle = match process::ProcessHandle::open(proc.pid) {
         Ok(h) => h,
         Err(e) => {
             eprintln!("error: {e}");
@@ -157,7 +157,7 @@ fn main() -> ExitCode {
 /// Walk the requested window and report addresses that look like a real
 /// `snapshot_t`.
 fn find_snapshot_candidates(
-    handle: &memory::ProcessHandle,
+    handle: &process::ProcessHandle,
     start: usize,
     end: usize,
 ) -> Vec<usize> {
