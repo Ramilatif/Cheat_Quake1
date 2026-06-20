@@ -119,6 +119,45 @@ impl ProcessHandle {
 
         Ok(out)
     }
+
+    /// Read `buf.len()` raw bytes from `address` into `buf`.
+    ///
+    /// Useful when the size isn't known at compile time — typically
+    /// when the [`scanner`] crate streams large windows of the target's
+    /// memory through a reusable buffer. Prefer the typed
+    /// [`read`](Self::read) for fixed-layout structs.
+    ///
+    /// Returns [`ReadError::Read`] on any partial read.
+    pub fn read_into(&self, address: usize, buf: &mut [u8]) -> Result<(), ReadError> {
+        let size = buf.len();
+        let mut bytes_read: usize = 0;
+
+        // SAFETY: `buf` is a valid writable slice of exactly `size` bytes.
+        unsafe {
+            ReadProcessMemory(
+                self.handle,
+                address as *const _,
+                buf.as_mut_ptr().cast(),
+                size,
+                Some(&mut bytes_read),
+            )
+        }
+        .map_err(|source| ReadError::Read {
+            address,
+            size,
+            source,
+        })?;
+
+        if bytes_read != size {
+            return Err(ReadError::Read {
+                address,
+                size,
+                source: windows::core::Error::from_win32(),
+            });
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for ProcessHandle {

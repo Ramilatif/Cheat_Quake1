@@ -1,0 +1,12 @@
+[package]
+name = "process"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "External-process discovery and memory access on Windows"
+
+[dependencies]
+bytemuck.workspace = true
+thiserror.workspace = true
+windows.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "scanner"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Generic memory-scan primitives: chunked reads, stride detection"
+
+[dependencies]
+bytemuck.workspace = true
+process = { path = "../process" }

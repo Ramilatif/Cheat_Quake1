@@ -1,0 +1,19 @@
+[package]
+name = "cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "qcheat: command-line entry point for the Cheat_Quake1 toolkit"
+
+[dependencies]
+anyhow.workspace = true
+bytemuck.workspace = true
+clap.workspace = true
+process = { path = "../process" }
+scanner = { path = "../scanner" }
+sdk = { path = "../sdk" }
+
+[[bin]]
+name = "qcheat"
+path = "src/main.rs"
