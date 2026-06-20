@@ -37,9 +37,9 @@ crates/
                detection recognises array layouts in scattered hits.
                Unit-tested, no game knowledge.
 
-  cli/         Binaries that drive the lower-level crates against a live
-               ioquake3 process. The only crate that imports all the
-               others.
+  cli/         `qcheat` — single binary with one subcommand per
+               operation, built on top of the lower-level crates. The
+               only crate that imports all the others.
 
 offsets.json   Reference table of struct sizes, field offsets, and
                engine RVAs derived from ioquake3 master.
@@ -64,24 +64,27 @@ docs/
             cli ◄──────────────┘
 ```
 
-## Binaries
+## The `qcheat` binary
 
-All live under `crates/cli/src/bin/`:
+Everything ships as a single executable, `qcheat`, with one subcommand
+per operation. Each subcommand lives under `crates/cli/src/cmd/` and
+exposes its own `--help`.
 
-| Binary           | What it does                                                       |
-| ---------------- | ------------------------------------------------------------------ |
-| `find-process`   | Locate `ioquake3.x86_64.exe`, report PID and main-module base.     |
-| `list-modules`   | Enumerate every DLL loaded in the target process.                  |
-| `read-hp`        | Read the engine-side `cl.snap.ps.stats[STAT_HEALTH]` at a known RVA. |
-| `inspect-entity` | Treat an arbitrary address as an `entityState_t` and pretty-print. |
-| `scan-entities`  | Brute-scan a memory window for `entityState_t`-shaped bytes and detect array strides. |
-| `dump-players`   | Whole-heap scan filtered to `ET_PLAYER` entities.                  |
-| `dump-snapshot`  | Locate `cg.activeSnapshots[2]` by its 53 772-byte signature pair, then dump the live local-player block and every visible entity for the current frame. |
+| Subcommand        | What it does                                                       |
+| ----------------- | ------------------------------------------------------------------ |
+| `qcheat find`     | Locate `ioquake3.x86_64.exe`, report PID and main-module base.     |
+| `qcheat modules`  | Enumerate every DLL loaded in the target process.                  |
+| `qcheat hp`       | Poll a 32-bit value at a fixed address (typically engine-side HP). |
+| `qcheat inspect`  | Treat an arbitrary address as an `entityState_t` and pretty-print. Modes: `--mode origin\|raw\|vec3`. |
+| `qcheat scan`     | Brute-scan a memory window for `entityState_t`-shaped bytes and detect array strides. |
+| `qcheat players`  | Whole-heap scan filtered to `ET_PLAYER` entities.                  |
+| `qcheat snapshot` | Locate `cg.activeSnapshots[2]` by its 53 772-byte signature pair, then dump the live local-player block and every visible entity for the current frame. |
 
-Build everything:
+Build (debug + release):
 
 ```powershell
-cargo build --workspace
+cargo build --workspace            # target/debug/qcheat.exe
+cargo build --release              # target/release/qcheat.exe — distributable
 ```
 
 Run the unit tests (currently `scanner::stride`):
@@ -93,9 +96,19 @@ cargo test --workspace
 Typical workflow with ioquake3 running and a map loaded:
 
 ```powershell
-cargo run -p cli --bin find-process
-cargo run -p cli --bin dump-snapshot
+cargo run -p cli -- find
+cargo run -p cli -- snapshot
+cargo run -p cli -- inspect 0x0613F728 --mode raw
+cargo run -p cli -- scan 0x06800000 0x80000
+
+# Or directly with the built binary:
+.\target\release\qcheat.exe snapshot
+.\target\release\qcheat.exe --help
 ```
+
+Note: `qcheat` is a console application. Launching it by double-click
+from Explorer just flashes a window with the auto-generated help and
+exits — always run it from PowerShell / cmd.
 
 ## How the snapshot reader works
 
@@ -103,16 +116,16 @@ ioquake3's client renders each frame from a `snapshot_t` produced by the
 server. Inside the cgame VM, the active and next snapshots are stored
 back-to-back as `cg.activeSnapshots[2]` (~53.8 KiB each).
 
-`dump-snapshot` walks the QVM heap window at 4-byte alignment, treating
-every offset as a candidate `SnapshotHeader` and applying a strict
-sanity filter (`pm_type` ∈ 0..=8, `clientNum` ∈ 0..MAX_CLIENTS, weapon ∈
-0..=15, finite in-map origin, plausible HP, non-empty player state).
-The decisive signal is when two candidates sit **exactly**
+`qcheat snapshot` walks the QVM heap window at 4-byte alignment,
+treating every offset as a candidate `SnapshotHeader` and applying a
+strict sanity filter (`pm_type` ∈ 0..=8, `clientNum` ∈ 0..MAX_CLIENTS,
+weapon ∈ 0..=15, finite in-map origin, plausible HP, non-empty player
+state). The decisive signal is when two candidates sit **exactly**
 `sizeof(snapshot_t) = 53 772` bytes apart — that's the
 `cg.activeSnapshots[0..2]` pair, and we pick whichever has the larger
 `serverTime` (= the active `cg.snap`).
 
-Once located, the binary reads the 53 KiB struct in one
+Once located, the subcommand reads the 53 KiB struct in one
 `ReadProcessMemory` round-trip and iterates
 `entities[0..numEntities]`. For `ET_PLAYER` entities, the canonical
 position is `pos.trBase` (not `origin`, which the engine leaves zero for
@@ -150,7 +163,7 @@ consulted without running the build.
 
 ## Writeup
 
-A walkthrough of the reverse-engineering work — how `dump-snapshot`
+A walkthrough of the reverse-engineering work — how `qcheat snapshot`
 was built, the dead ends along the way, and why client-side ESP in
 Quake III is PVS-bounded by construction — lives in
 [docs/reverse-engineering.md](docs/reverse-engineering.md).
