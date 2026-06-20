@@ -15,20 +15,58 @@ project does not redistribute any of its code.
 
 ## Workspace layout
 
+Four crates with strictly layered responsibilities. A dependency never
+travels up the stack: `sdk` knows nothing about Windows, `process`
+knows nothing about Quake, `scanner` knows nothing about either, and
+the binaries in `cli` glue everything together.
+
 ```
 crates/
   sdk/         repr(C) mirrors of ioquake3 engine structs
                (Vec3, Trajectory, EntityState, PlayerState, Snapshot)
-               with compile-time size assertions.
-  memory/      Windows ReadProcessMemory helpers and binaries that
-               drive them.
+               with compile-time size and offset assertions.
+               No Windows deps, no I/O.
+
+  process/     External-process discovery and memory access on Windows.
+               ProcessHandle, ReadProcessMemory wrapper, Toolhelp32-based
+               find_by_name / list_modules. Game-agnostic.
+
+  scanner/     Generic memory-scan primitives. scan_aligned() streams a
+               window through a reusable buffer and hands every aligned
+               candidate to a caller-supplied predicate; stride
+               detection recognises array layouts in scattered hits.
+               Unit-tested, no game knowledge.
+
+  cli/         Binaries that drive the lower-level crates against a live
+               ioquake3 process. The only crate that imports all the
+               others.
+
 offsets.json   Reference table of struct sizes, field offsets, and
                engine RVAs derived from ioquake3 master.
+
+docs/
+  reverse-engineering.md   Full walkthrough of how dump-snapshot was
+                           built and why client-side ESP is PVS-bounded.
+```
+
+### Dependency graph
+
+```
+            sdk  ──────────────┐
+             ▲                 │
+             │                 │
+         scanner               │
+             ▲                 │
+             │                 │
+          process ◄────────────┤
+             ▲                 │
+             │                 │
+            cli ◄──────────────┘
 ```
 
 ## Binaries
 
-All live under `crates/memory/src/bin/`:
+All live under `crates/cli/src/bin/`:
 
 | Binary           | What it does                                                       |
 | ---------------- | ------------------------------------------------------------------ |
@@ -46,11 +84,17 @@ Build everything:
 cargo build --workspace
 ```
 
+Run the unit tests (currently `scanner::stride`):
+
+```powershell
+cargo test --workspace
+```
+
 Typical workflow with ioquake3 running and a map loaded:
 
 ```powershell
-cargo run -p memory --bin find-process
-cargo run -p memory --bin dump-snapshot
+cargo run -p cli --bin find-process
+cargo run -p cli --bin dump-snapshot
 ```
 
 ## How the snapshot reader works
