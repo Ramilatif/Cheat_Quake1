@@ -20,6 +20,28 @@
       "description": "cl.snap.ps.stats[STAT_HEALTH] — engine-side copy of the local player HP. Matches the HUD in real time.",
       "found_on": "2026-04-20",
       "found_via": "Cheat Engine: scan 4 Bytes exact value, narrowed by taking damage, confirmed by watching value track the HUD."
+    },
+    "cl_snap_ps_viewangles_yaw": {
+      "rva": "0x7B4098",
+      "type": "f32",
+      "description": "cl.snap.ps.viewangles[1] (YAW) — left/right view angle. First occurrence in cl.snap.",
+      "found_on": "2026-09-09",
+      "found_via": "Cheat Engine: Float scan tracking view angle changes, confirmed by Defrag angle display."
+    },
+    "cl_snap_ps_viewangles_pitch": {
+      "rva": "0x7B409C",
+      "type": "f32",
+      "description": "cl.snap.ps.viewangles[0] (PITCH) — up/down view angle. First occurrence in cl.snap.",
+      "found_on": "2026-09-09",
+      "found_via": "Cheat Engine: Float scan tracking view angle changes, confirmed by Defrag angle display."
+    },
+    "cl_snapshots_stride": {
+      "rva": "0x7B9984",
+      "type": "f32",
+      "stride": "0x21C",
+      "count": 32,
+      "description": "cl.snapshots[0..32] array, each containing ps.viewangles at same offsets as cl.snap. Stride = sizeof(clSnapshot_t) = 540 bytes.",
+      "note": "These are copies from snapshots, same layout repeats 32 times with 0x21C (540) byte spacing."
     }
   },
 

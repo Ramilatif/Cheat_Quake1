@@ -11,6 +11,7 @@
 //! mechanical and lets contributors add a new verb by following the
 //! shape of an existing one.
 
+pub mod aimbot;
 pub mod find;
 pub mod hp;
 pub mod inspect;

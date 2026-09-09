@@ -7,7 +7,7 @@
 //! "read 4 KiB, slide a window, skip unmapped pages" boilerplate.
 
 use bytemuck::{from_bytes, Pod};
-use process::{ProcessHandle, ReadError};
+use process::{ProcessHandle, ProcessError};
 
 /// Size of each `ReadProcessMemory` round-trip during a scan.
 ///
@@ -48,7 +48,7 @@ pub fn scan_aligned<T, F>(
     end: usize,
     alignment: usize,
     mut predicate: F,
-) -> Result<Vec<Hit<T>>, ReadError>
+) -> Result<Vec<Hit<T>>, ProcessError>
 where
     T: Pod,
     F: FnMut(&T) -> bool,

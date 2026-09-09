@@ -19,6 +19,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
+    /// Aim assistance targeting the closest visible player.
+    Aimbot(cmd::aimbot::Args),
     /// Locate the target process and report its PID + module base.
     Find(cmd::find::Args),
     /// List every DLL loaded in the target process.
@@ -37,6 +39,7 @@ enum Cmd {
 
 fn main() -> Result<()> {
     match Cli::parse().command {
+        Cmd::Aimbot(a) => cmd::aimbot::run(a),
         Cmd::Find(a) => cmd::find::run(a),
         Cmd::Modules(a) => cmd::modules::run(a),
         Cmd::Hp(a) => cmd::hp::run(a),
