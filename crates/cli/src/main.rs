@@ -21,8 +21,12 @@ struct Cli {
 enum Cmd {
     /// Aim assistance targeting the closest visible player.
     Aimbot(cmd::aimbot::Args),
+    /// Aim assistance via synthetic mouse input (SendInput).
+    AimMouse(cmd::aim_mouse::Args),
     /// Locate the target process and report its PID + module base.
     Find(cmd::find::Args),
+    /// Scan memory for the live view-angle variable used by rendering.
+    FindViewangles(cmd::find_viewangles::Args),
     /// List every DLL loaded in the target process.
     Modules(cmd::modules::Args),
     /// Poll a 32-bit value at a fixed address (typically HP).
@@ -40,7 +44,9 @@ enum Cmd {
 fn main() -> Result<()> {
     match Cli::parse().command {
         Cmd::Aimbot(a) => cmd::aimbot::run(a),
+        Cmd::AimMouse(a) => cmd::aim_mouse::run(a),
         Cmd::Find(a) => cmd::find::run(a),
+        Cmd::FindViewangles(a) => cmd::find_viewangles::run(a),
         Cmd::Modules(a) => cmd::modules::run(a),
         Cmd::Hp(a) => cmd::hp::run(a),
         Cmd::Inspect(a) => cmd::inspect::run(a),

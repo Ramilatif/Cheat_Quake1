@@ -13,6 +13,7 @@ clap.workspace = true
 process = { path = "../process" }
 scanner = { path = "../scanner" }
 sdk = { path = "../sdk" }
+windows.workspace = true
 
 [[bin]]
 name = "qcheat"

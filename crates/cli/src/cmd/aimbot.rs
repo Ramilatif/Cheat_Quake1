@@ -13,9 +13,14 @@ const HEADER_SIZE: usize = core::mem::size_of::<sdk::SnapshotHeader>();
 const DEFAULT_CENTER: usize = 0x07000000;
 const DEFAULT_RANGE: usize = 0x02000000;
 
-// Offsets trouvés empiriquement (tableau de 32 snapshots)
-const CL_VIEWANGLES_YAW_BASE: usize = 0x7B4098;
-const CL_VIEWANGLES_PITCH_BASE: usize = 0x7B409C;
+// Offsets trouvés empiriquement
+// 0x7B409C est cg.refdefViewAngles (pitch) - la caméra visible
+// 0x7B4098 est cg.refdefViewAngles (yaw)
+const REFDEF_PITCH: usize = 0x7B409C;
+const REFDEF_YAW: usize = 0x7B4098;
+
+// Les snapshots (0x21C apart = 540 bytes)
+const SNAPSHOT_BASE_YAW: usize = 0x7B9988;
 const SNAPSHOT_STRIDE: usize = 0x21C;  // 540 bytes = sizeof(clSnapshot_t)
 const NUM_SNAPSHOTS: usize = 32;
 
@@ -49,18 +54,25 @@ pub fn run(args: Args) -> Result<()> {
         proc.name, proc.pid
     );
 
-    // Build list of all 32 snapshot addresses
-    let mut yaw_addrs = Vec::new();
-    let mut pitch_addrs = Vec::new();
+    // Primary camera angles (cg.refdefViewAngles)
+    let refdef_yaw = module_base + REFDEF_YAW;
+    let refdef_pitch = module_base + REFDEF_PITCH;
+
+    // Build list of all 32 snapshot addresses for synchronization
+    let mut snap_yaw_addrs = Vec::new();
+    let mut snap_pitch_addrs = Vec::new();
 
     for i in 0..NUM_SNAPSHOTS {
-        yaw_addrs.push(module_base + CL_VIEWANGLES_YAW_BASE + (i * SNAPSHOT_STRIDE));
-        pitch_addrs.push(module_base + CL_VIEWANGLES_PITCH_BASE + (i * SNAPSHOT_STRIDE));
+        snap_yaw_addrs.push(module_base + SNAPSHOT_BASE_YAW + (i * SNAPSHOT_STRIDE));
+        snap_pitch_addrs.push(module_base + REFDEF_PITCH + (i * SNAPSHOT_STRIDE));
     }
 
-    println!("Target addresses ({} snapshots):", NUM_SNAPSHOTS);
-    println!("  Yaw base:   0x{:016X}", yaw_addrs[0]);
-    println!("  Pitch base: 0x{:016X}\n", pitch_addrs[0]);
+    println!("Primary camera (cg.refdefViewAngles):");
+    println!("  Yaw:   0x{:016X}", refdef_yaw);
+    println!("  Pitch: 0x{:016X}", refdef_pitch);
+    println!("\nSnapshot copies ({} snapshots):", NUM_SNAPSHOTS);
+    println!("  First Yaw:   0x{:016X}", snap_yaw_addrs[0]);
+    println!("  First Pitch: 0x{:016X}\n", snap_pitch_addrs[0]);
 
     loop {
         // Find snapshot
@@ -134,22 +146,24 @@ pub fn run(args: Args) -> Result<()> {
             }
         }
 
-        // Calculate and write angles to ALL 32 snapshots
+        // Calculate and write angles
         if let Some((target, dist)) = closest {
             let target_pos = target.pos.tr_base;
             let angles = calculate_angles(local_pos, target_pos);
 
-            // Write to all 32 snapshot copies
-            let mut write_count = 0;
+            // 1. Write to PRIMARY camera (cg.refdefViewAngles) - most important
+            let _ = handle.write_f32(refdef_yaw, angles.0);
+            let _ = handle.write_f32(refdef_pitch, angles.1);
+
+            // 2. Write to all 32 snapshot copies for synchronization
             for i in 0..NUM_SNAPSHOTS {
-                let _ = handle.write_f32(yaw_addrs[i], angles.0);
-                let _ = handle.write_f32(pitch_addrs[i], angles.1);
-                write_count += 1;
+                let _ = handle.write_f32(snap_yaw_addrs[i], angles.0);
+                let _ = handle.write_f32(snap_pitch_addrs[i], angles.1);
             }
 
             println!(
-                "Target: client {}, dist {:.1}m, angles ({:.1}°, {:.1}°) [wrote to {} snapshots]",
-                target.client_num, dist, angles.1, angles.0, write_count
+                "Target: client {}, dist {:.1}m, angles ({:.1}°, {:.1}°) [primary + 32 snapshots]",
+                target.client_num, dist, angles.1, angles.0
             );
         } else {
             let players = entity_types.iter().filter(|&&t| t == EntityType::PLAYER as i32).count();
