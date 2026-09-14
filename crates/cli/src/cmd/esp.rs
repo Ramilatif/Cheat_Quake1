@@ -11,9 +11,10 @@
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
-use sdk::{EntityState, EntityType, Snapshot, Vec3, MAX_ENTITIES_IN_SNAPSHOT};
+use sdk::{EntityType, Snapshot, Vec3, MAX_ENTITIES_IN_SNAPSHOT};
+use std::collections::HashMap;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
@@ -25,7 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, GetClientRect, GetWindowThreadProcessId,
     PeekMessageW, PostQuitMessage, RegisterClassW, SetLayeredWindowAttributes, SetWindowPos,
     ShowWindow, TranslateMessage, CS_HREDRAW, CS_VREDRAW, HWND_TOPMOST, LWA_COLORKEY, MSG,
-    PM_REMOVE, SWP_NOACTIVATE, SW_SHOWNOACTIVATE, WM_DESTROY, WNDCLASSW, WS_EX_LAYERED,
+    PM_REMOVE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_SHOWNOACTIVATE, WM_DESTROY, WNDCLASSW, WS_EX_LAYERED,
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -44,6 +45,16 @@ const PLAYER_HEIGHT: f32 = 40.0;
 const COLOR_KEY: u32 = 0x00000000;
 const BOX_COLOR: u32 = 0x0000FF; // BGR: red
 const TEXT_COLOR: u32 = 0x00FFFF; // BGR: yellow
+
+/// Last real snapshot position/velocity for one tracked enemy, used to
+/// extrapolate its position between real snapshots (which only arrive
+/// at sv_fps, ~20-40Hz) so the box moves smoothly at the overlay's own
+/// refresh rate instead of stair-stepping.
+struct Track {
+    pos: Vec3,
+    vel: Vec3,
+    wall: Instant,
+}
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -95,9 +106,28 @@ pub fn run(args: Args) -> Result<()> {
     println!("Overlay up. Ctrl+C in this terminal to stop.\n");
 
     let mut cached_addrs: Vec<usize> = locate_snapshot_addrs(&handle, start, end);
+    let mut last_server_time = i32::MIN;
+    let mut tracks: HashMap<i32, Track> = HashMap::new();
 
     loop {
         pump_messages();
+
+        // Windows periodically demotes a topmost layered window (game
+        // regains focus, alt-tab, a notification pops up, ...) since
+        // we only asked for HWND_TOPMOST once at creation. Re-assert
+        // it every tick — cheap, and keeps the overlay from silently
+        // sinking behind the game.
+        unsafe {
+            let _ = SetWindowPos(
+                overlay,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
+            );
+        }
 
         let cache_ok = !cached_addrs.is_empty()
             && cached_addrs.iter().any(|&a| {
@@ -136,27 +166,73 @@ pub fn run(args: Args) -> Result<()> {
             }
         };
 
+        // Our own position/angles come from cg.predictedPlayerState,
+        // which the game updates every render frame via client-side
+        // prediction (not just at network tick rate) — so it's safe
+        // to read fresh every poll, no extrapolation needed here.
         let eye = snap.header.ps.origin;
         let (forward, right, up) = angle_vectors(
             snap.header.ps.viewangles.y, // yaw
             snap.header.ps.viewangles.x, // pitch
         );
 
+        if snap.header.server_time != last_server_time {
+            // A real snapshot arrived — refresh velocity for every
+            // currently-visible living enemy, and drop tracks for
+            // anyone no longer present (dead, disconnected, out of
+            // range) so their box doesn't linger extrapolated forever.
+            let dt_server = (snap.header.server_time - last_server_time) as f32 / 1000.0;
+            let mut seen = std::collections::HashSet::new();
+
+            for es in &snap.entities
+                [..snap.header.num_entities.min(MAX_ENTITIES_IN_SNAPSHOT as i32) as usize]
+            {
+                if es.e_type != EntityType::PLAYER {
+                    continue;
+                }
+                if es.client_num == snap.header.ps.client_num {
+                    continue;
+                }
+                if es.e_flags & EF_DEAD != 0 {
+                    continue;
+                }
+                seen.insert(es.client_num);
+                let new_pos = es.pos.tr_base;
+
+                let vel = match tracks.get(&es.client_num) {
+                    Some(prev) if last_server_time != i32::MIN && dt_server > 0.001 => Vec3::new(
+                        (new_pos.x - prev.pos.x) / dt_server,
+                        (new_pos.y - prev.pos.y) / dt_server,
+                        (new_pos.z - prev.pos.z) / dt_server,
+                    ),
+                    _ => Vec3::ZERO,
+                };
+
+                tracks.insert(
+                    es.client_num,
+                    Track {
+                        pos: new_pos,
+                        vel,
+                        wall: Instant::now(),
+                    },
+                );
+            }
+
+            tracks.retain(|client_num, _| seen.contains(client_num));
+            last_server_time = snap.header.server_time;
+        }
+
         let mut boxes: Vec<(f32, f32, f32, f32, i32)> = Vec::new();
-        for es in &snap.entities
-            [..snap.header.num_entities.min(MAX_ENTITIES_IN_SNAPSHOT as i32) as usize]
-        {
-            if es.e_type != EntityType::PLAYER {
-                continue;
-            }
-            if es.client_num == snap.header.ps.client_num {
-                continue;
-            }
-            if es.e_flags & EF_DEAD != 0 {
-                continue;
-            }
+        for (&client_num, track) in &tracks {
+            let elapsed = track.wall.elapsed().as_secs_f32();
+            let predicted = Vec3::new(
+                track.pos.x + track.vel.x * elapsed,
+                track.pos.y + track.vel.y * elapsed,
+                track.pos.z + track.vel.z * elapsed,
+            );
             if let Some(b) = project_player_box(
-                es,
+                predicted,
+                client_num,
                 eye,
                 forward,
                 right,
@@ -175,10 +251,12 @@ pub fn run(args: Args) -> Result<()> {
     }
 }
 
-/// Turn one player entity into an on-screen `(left, top, right, bottom,
-/// client_num)` box, or `None` if it's fully behind the camera.
+/// Turn one (possibly extrapolated) feet position into an on-screen
+/// `(left, top, right, bottom, client_num)` box, or `None` if it's
+/// fully behind the camera.
 fn project_player_box(
-    es: &EntityState,
+    feet: Vec3,
+    client_num: i32,
     eye: Vec3,
     forward: Vec3,
     right: Vec3,
@@ -187,7 +265,6 @@ fn project_player_box(
     screen_h: f32,
     fov_deg: f32,
 ) -> Option<(f32, f32, f32, f32, i32)> {
-    let feet = es.pos.tr_base;
     let head = Vec3::new(feet.x, feet.y, feet.z + PLAYER_HEIGHT);
 
     let (fx, fy) = world_to_screen(feet, eye, forward, right, up, screen_w, screen_h, fov_deg)?;
@@ -199,7 +276,7 @@ fn project_player_box(
     let top = hy.min(fy);
     let bottom = hy.max(fy);
 
-    Some((cx - box_w * 0.5, top, cx + box_w * 0.5, bottom, es.client_num))
+    Some((cx - box_w * 0.5, top, cx + box_w * 0.5, bottom, client_num))
 }
 
 /// Quake's `AngleVectors` with roll assumed 0 — returns
