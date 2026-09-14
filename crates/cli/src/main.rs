@@ -23,6 +23,8 @@ enum Cmd {
     Aimbot(cmd::aimbot::Args),
     /// Aim assistance via synthetic mouse input (SendInput).
     AimMouse(cmd::aim_mouse::Args),
+    /// Wallhack overlay — draws boxes over enemies through walls.
+    Esp(cmd::esp::Args),
     /// Locate the target process and report its PID + module base.
     Find(cmd::find::Args),
     /// Scan memory for the live view-angle variable used by rendering.
@@ -45,6 +47,7 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Cmd::Aimbot(a) => cmd::aimbot::run(a),
         Cmd::AimMouse(a) => cmd::aim_mouse::run(a),
+        Cmd::Esp(a) => cmd::esp::run(a),
         Cmd::Find(a) => cmd::find::run(a),
         Cmd::FindViewangles(a) => cmd::find_viewangles::run(a),
         Cmd::Modules(a) => cmd::modules::run(a),
