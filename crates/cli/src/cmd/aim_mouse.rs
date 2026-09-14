@@ -15,7 +15,7 @@ use anyhow::Result;
 use clap::Args as ClapArgs;
 use sdk::{EntityState, EntityType, Snapshot, MAX_ENTITIES_IN_SNAPSHOT};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
 };
@@ -41,7 +41,9 @@ pub struct Args {
     pub range: Option<usize>,
 
     /// How often to recompute and send a mouse correction (ms).
-    #[arg(long, default_value = "16")]
+    /// Lower = smoother tracking but more CPU/memory-read overhead.
+    /// 16 = ~60Hz, 8 = ~120Hz.
+    #[arg(long, default_value = "8")]
     pub interval_ms: u64,
 
     /// In-game `sensitivity` cvar.
@@ -96,6 +98,27 @@ pub fn run(args: Args) -> Result<()> {
 
     let mut enabled = true;
     let mut toggle_key_was_down = false;
+
+    // The server only ships a new snapshot every sv_fps tick (~20-40Hz)
+    // — far slower than our poll loop. Rather than either (a) firing a
+    // fresh correction every poll on the same stale error, which
+    // overshoots and oscillates (visible as jitter), or (b) throttling
+    // corrections down to server rate, which looks choppy, we predict
+    // between real updates the same way the game's own renderer does:
+    // - the target's position is linearly extrapolated using the
+    //   velocity observed between the last two real snapshots
+    // - our own view angle is tracked locally by integrating the
+    //   corrections we've sent (instead of re-reading it, which would
+    //   still be stale between snapshots), and resynced to ground
+    //   truth every time a real snapshot arrives to correct any drift
+    let mut last_server_time = i32::MIN;
+    let mut own_yaw: Option<f32> = None;
+    let mut own_pitch: Option<f32> = None;
+    let mut local_pos = sdk::Vec3::ZERO;
+    let mut target_client_num: Option<i32> = None;
+    let mut target_base_pos = sdk::Vec3::ZERO;
+    let mut target_vel = sdk::Vec3::ZERO;
+    let mut target_base_wall = Instant::now();
 
     // degrees produced by one raw mouse count at this sensitivity
     let deg_per_count_yaw = args.sensitivity * args.m_yaw;
@@ -159,44 +182,93 @@ pub fn run(args: Args) -> Result<()> {
             }
         };
 
-        let local_pos = snap.header.ps.origin;
-        let current_yaw = snap.header.ps.viewangles.y;
-        let current_pitch = snap.header.ps.viewangles.x;
+        if snap.header.server_time != last_server_time {
+            // A real snapshot arrived — resync ground truth and
+            // recompute the target's velocity from how far it moved
+            // since the previous real snapshot.
+            let dt_server = (snap.header.server_time - last_server_time) as f32 / 1000.0;
+            local_pos = snap.header.ps.origin;
+            own_yaw = Some(snap.header.ps.viewangles.y);
+            own_pitch = Some(snap.header.ps.viewangles.x);
 
-        let mut closest: Option<(&EntityState, f32)> = None;
-        for es in &snap.entities[..snap.header.num_entities.min(MAX_ENTITIES_IN_SNAPSHOT as i32) as usize]
-        {
-            if es.e_type != EntityType::PLAYER {
-                continue;
+            let mut closest: Option<(&EntityState, f32)> = None;
+            for es in &snap.entities
+                [..snap.header.num_entities.min(MAX_ENTITIES_IN_SNAPSHOT as i32) as usize]
+            {
+                if es.e_type != EntityType::PLAYER {
+                    continue;
+                }
+                // Skip our own entity — it's included in the
+                // snapshot's entity list too, and would otherwise
+                // "win" as the closest target at distance 0.
+                if es.client_num == snap.header.ps.client_num {
+                    continue;
+                }
+                // Skip dead players (EF_DEAD, bg_public.h) — no point
+                // tracking a corpse.
+                if es.e_flags & EF_DEAD != 0 {
+                    continue;
+                }
+                let target_pos = es.pos.tr_base;
+                let dx = target_pos.x - local_pos.x;
+                let dy = target_pos.y - local_pos.y;
+                let dz = target_pos.z - local_pos.z;
+                let dist = (dx * dx + dy * dy + dz * dz).sqrt();
+                match &closest {
+                    None => closest = Some((es, dist)),
+                    Some((_, d)) if dist < *d => closest = Some((es, dist)),
+                    _ => {}
+                }
             }
-            // Skip our own entity — it's included in the snapshot's
-            // entity list too, and would otherwise "win" as the
-            // closest target at distance 0.
-            if es.client_num == snap.header.ps.client_num {
-                continue;
+
+            match closest {
+                Some((target, dist)) => {
+                    let new_pos = target.pos.tr_base;
+                    target_vel = if target_client_num == Some(target.client_num)
+                        && last_server_time != i32::MIN
+                        && dt_server > 0.001
+                    {
+                        sdk::Vec3::new(
+                            (new_pos.x - target_base_pos.x) / dt_server,
+                            (new_pos.y - target_base_pos.y) / dt_server,
+                            (new_pos.z - target_base_pos.z) / dt_server,
+                        )
+                    } else {
+                        sdk::Vec3::ZERO
+                    };
+                    target_base_pos = new_pos;
+                    target_base_wall = Instant::now();
+                    target_client_num = Some(target.client_num);
+                    println!(
+                        "[{}] Locked: client {}, dist {:.1}m, vel ({:.0}, {:.0}, {:.0})",
+                        if enabled { "ON" } else { "OFF" },
+                        target.client_num,
+                        dist,
+                        target_vel.x,
+                        target_vel.y,
+                        target_vel.z
+                    );
+                }
+                None => {
+                    target_client_num = None;
+                    println!("No players found.");
+                }
             }
-            // Skip dead players (EF_DEAD, bg_public.h) — no point
-            // tracking a corpse.
-            if es.e_flags & EF_DEAD != 0 {
-                continue;
-            }
-            let target_pos = es.pos.tr_base;
-            let dx = target_pos.x - local_pos.x;
-            let dy = target_pos.y - local_pos.y;
-            let dz = target_pos.z - local_pos.z;
-            let dist = (dx * dx + dy * dy + dz * dz).sqrt();
-            match &closest {
-                None => closest = Some((es, dist)),
-                Some((_, d)) if dist < *d => closest = Some((es, dist)),
-                _ => {}
-            }
+            last_server_time = snap.header.server_time;
         }
 
-        if let Some((target, dist)) = closest {
-            let (target_yaw, target_pitch) = calculate_angles(local_pos, target.pos.tr_base);
+        if let (Some(_), Some(oy), Some(op)) = (target_client_num, own_yaw, own_pitch) {
+            let elapsed = target_base_wall.elapsed().as_secs_f32();
+            let predicted = sdk::Vec3::new(
+                target_base_pos.x + target_vel.x * elapsed,
+                target_base_pos.y + target_vel.y * elapsed,
+                target_base_pos.z + target_vel.z * elapsed,
+            );
 
-            let err_yaw = normalize_angle(target_yaw - current_yaw);
-            let err_pitch = normalize_angle(target_pitch - current_pitch);
+            let (target_yaw, target_pitch) = calculate_angles(local_pos, predicted);
+
+            let err_yaw = normalize_angle(target_yaw - oy);
+            let err_pitch = normalize_angle(target_pitch - op);
 
             let move_yaw = err_yaw * args.smooth;
             let move_pitch = err_pitch * args.smooth;
@@ -218,16 +290,16 @@ pub fn run(args: Args) -> Result<()> {
                 send_mouse_delta(dx, dy);
             }
 
-            println!(
-                "[{}] Target: client {}, dist {:.1}m, err (yaw {:.1} pitch {:.1}) -> mouse ({dx}, {dy})",
-                if enabled { "ON" } else { "OFF" },
-                target.client_num,
-                dist,
-                err_yaw,
-                err_pitch
-            );
-        } else {
-            println!("No players found.");
+            // Integrate our own predicted view angle by exactly the
+            // amount we just told the mouse to move (using the
+            // clamped dx/dy, so it matches reality even when a big
+            // error got clamped), instead of re-reading it — which
+            // would still show the pre-correction value until the
+            // next real snapshot.
+            let applied_yaw = -deg_per_count_yaw * dx as f32;
+            let applied_pitch = deg_per_count_pitch * dy as f32;
+            own_yaw = Some(oy + applied_yaw);
+            own_pitch = Some((op + applied_pitch).clamp(-90.0, 90.0));
         }
 
         thread::sleep(Duration::from_millis(args.interval_ms));
