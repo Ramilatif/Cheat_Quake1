@@ -26,6 +26,8 @@ const CHUNK: usize = 4096;
 const HEADER_SIZE: usize = core::mem::size_of::<sdk::SnapshotHeader>();
 const DEFAULT_CENTER: usize = 0x07000000;
 const DEFAULT_RANGE: usize = 0x02000000;
+/// bg_public.h: entityState_t.eFlags bit set on dead players.
+const EF_DEAD: i32 = 0x0000_0001;
 
 #[derive(ClapArgs)]
 pub struct Args {
@@ -171,6 +173,11 @@ pub fn run(args: Args) -> Result<()> {
             // entity list too, and would otherwise "win" as the
             // closest target at distance 0.
             if es.client_num == snap.header.ps.client_num {
+                continue;
+            }
+            // Skip dead players (EF_DEAD, bg_public.h) — no point
+            // tracking a corpse.
+            if es.e_flags & EF_DEAD != 0 {
                 continue;
             }
             let target_pos = es.pos.tr_base;
