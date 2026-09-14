@@ -57,7 +57,8 @@ pub struct Args {
     pub range: Option<usize>,
 
     /// How often to re-read entities and redraw the overlay (ms).
-    #[arg(long, default_value = "16")]
+    /// Lower = smoother but more CPU/GDI overhead. 16 = ~60Hz, 8 = ~120Hz.
+    #[arg(long, default_value = "8")]
     pub interval_ms: u64,
 
     /// Horizontal field of view in degrees (in-game `cg_fov` cvar).
@@ -98,16 +99,21 @@ pub fn run(args: Args) -> Result<()> {
     loop {
         pump_messages();
 
-        if cached_addrs.is_empty()
-            || !cached_addrs
-                .iter()
-                .any(|&a| handle.read::<sdk::SnapshotHeader>(a).is_ok())
-        {
-            cached_addrs = locate_snapshot_addrs(&handle, start, end);
-            if cached_addrs.is_empty() {
+        let cache_ok = !cached_addrs.is_empty()
+            && cached_addrs.iter().any(|&a| {
+                handle
+                    .read::<sdk::SnapshotHeader>(a)
+                    .map(|h| looks_like_snapshot(&h))
+                    .unwrap_or(false)
+            });
+        if !cache_ok {
+            let fresh = locate_snapshot_addrs(&handle, start, end);
+            if fresh.is_empty() {
+                cached_addrs.clear();
                 thread::sleep(Duration::from_millis(args.interval_ms));
                 continue;
             }
+            cached_addrs = fresh;
         }
 
         let snap_addr = cached_addrs
