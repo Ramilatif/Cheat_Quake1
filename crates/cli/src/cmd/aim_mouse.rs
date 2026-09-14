@@ -17,7 +17,7 @@ use sdk::{EntityState, EntityType, Snapshot, MAX_ENTITIES_IN_SNAPSHOT};
 use std::thread;
 use std::time::Duration;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
+    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
 };
 
 use crate::util::{parse_hex, DEFAULT_PROCESS};
@@ -66,6 +66,12 @@ pub struct Args {
     /// fling the view.
     #[arg(long, default_value = "60")]
     pub max_delta: i32,
+
+    /// Virtual-key code that toggles the aimbot on/off (default:
+    /// Insert, 0x2D). See Microsoft's Virtual-Key Codes docs for
+    /// other values, e.g. 0x70 for F1.
+    #[arg(long, value_parser = parse_hex, default_value = "0x2D")]
+    pub toggle_key: usize,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -78,9 +84,16 @@ pub fn run(args: Args) -> Result<()> {
     let end = center.saturating_add(range);
 
     println!(
-        "Aim-mouse active on {} (pid {}). sensitivity={} m_yaw={} m_pitch={} smooth={}\n",
+        "Aim-mouse active on {} (pid {}). sensitivity={} m_yaw={} m_pitch={} smooth={}",
         proc.name, proc.pid, args.sensitivity, args.m_yaw, args.m_pitch, args.smooth
     );
+    println!(
+        "Press vkey 0x{:02X} to toggle the aimbot on/off (default: Insert).\n",
+        args.toggle_key
+    );
+
+    let mut enabled = true;
+    let mut toggle_key_was_down = false;
 
     // degrees produced by one raw mouse count at this sensitivity
     let deg_per_count_yaw = args.sensitivity * args.m_yaw;
@@ -101,6 +114,16 @@ pub fn run(args: Args) -> Result<()> {
     }
 
     loop {
+        // High bit of GetAsyncKeyState's result means "currently
+        // down". Edge-detect so one press = one toggle, not a toggle
+        // storm for as long as the key is held.
+        let key_down = unsafe { GetAsyncKeyState(args.toggle_key as i32) as u16 & 0x8000 != 0 };
+        if key_down && !toggle_key_was_down {
+            enabled = !enabled;
+            println!("\n>>> Aimbot {} <<<\n", if enabled { "ON" } else { "OFF" });
+        }
+        toggle_key_was_down = key_down;
+
         if cached_addrs.is_empty()
             || !cached_addrs
                 .iter()
@@ -144,6 +167,12 @@ pub fn run(args: Args) -> Result<()> {
             if es.e_type != EntityType::PLAYER {
                 continue;
             }
+            // Skip our own entity — it's included in the snapshot's
+            // entity list too, and would otherwise "win" as the
+            // closest target at distance 0.
+            if es.client_num == snap.header.ps.client_num {
+                continue;
+            }
             let target_pos = es.pos.tr_base;
             let dx = target_pos.x - local_pos.x;
             let dy = target_pos.y - local_pos.y;
@@ -178,13 +207,17 @@ pub fn run(args: Args) -> Result<()> {
             dx = dx.clamp(-args.max_delta, args.max_delta);
             dy = dy.clamp(-args.max_delta, args.max_delta);
 
-            if dx != 0 || dy != 0 {
+            if enabled && (dx != 0 || dy != 0) {
                 send_mouse_delta(dx, dy);
             }
 
             println!(
-                "Target: client {}, dist {:.1}m, err (yaw {:.1} pitch {:.1}) -> mouse ({dx}, {dy})",
-                target.client_num, dist, err_yaw, err_pitch
+                "[{}] Target: client {}, dist {:.1}m, err (yaw {:.1} pitch {:.1}) -> mouse ({dx}, {dy})",
+                if enabled { "ON" } else { "OFF" },
+                target.client_num,
+                dist,
+                err_yaw,
+                err_pitch
             );
         } else {
             println!("No players found.");
