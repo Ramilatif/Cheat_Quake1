@@ -225,6 +225,14 @@ pub fn run(args: Args) -> Result<()> {
 
     let mut cached_addrs: Vec<usize> = locate_snapshot_addrs(&handle, start, end);
     let mut last_server_time = i32::MIN;
+    // A real, active match ticks server_time constantly. A cached
+    // address that "looks like" a snapshot but never actually changes
+    // is either stale (launched before joining a match) or a
+    // false-positive match on unrelated memory — either way, once
+    // it's been frozen this long it's worth paying for a fresh scan.
+    let mut last_change_wall = Instant::now();
+    let mut last_seen_server_time = i32::MIN;
+    const STALL_RESCAN_AFTER: Duration = Duration::from_secs(3);
     let mut tracks: HashMap<i32, Track> = HashMap::new();
     let mut own_yaw: Option<f32> = None;
     let mut own_pitch: Option<f32> = None;
@@ -238,17 +246,13 @@ pub fn run(args: Args) -> Result<()> {
     let mut right_was_down = false;
 
     let mut tick: u64 = 0;
-    // Launching before actually being in a match can (a) capture the
+    // Launching before actually being in a match can capture the
     // wrong window size/position if the game hasn't reached its final
-    // resolution yet, and (b) latch onto a memory block that merely
-    // *looks* like a snapshot without being the real one, since our
-    // validity check only asks "is this still structurally
-    // plausible", not "has this actually changed". Periodically
-    // re-fetching the window rect and forcing a fresh snapshot search
-    // makes the tool self-heal once a real match actually starts,
-    // regardless of when it was launched.
+    // resolution yet. Periodically re-fetching the window rect makes
+    // the overlay self-correct once a real match actually starts,
+    // regardless of when the tool was launched. (We do NOT do the
+    // same blind-timer trick for the snapshot search — see below.)
     const WINDOW_RESYNC_EVERY: u64 = 120; // ~1s at 8ms/tick
-    const FORCE_RESCAN_EVERY: u64 = 600; // ~5s at 8ms/tick
 
     loop {
         tick += 1;
@@ -348,6 +352,11 @@ pub fn run(args: Args) -> Result<()> {
         }
 
         // --- snapshot cache (see aim_mouse.rs / esp.rs for why) ---
+        // Only rescan reactively (cache actually looks invalid), never
+        // on a blind timer: a full scan of this address range takes
+        // ~1-2 seconds of ReadProcessMemory calls, which would freeze
+        // both the aimbot and the wallhack for that whole window if
+        // triggered on a schedule regardless of need.
         let cache_ok = !cached_addrs.is_empty()
             && cached_addrs.iter().any(|&a| {
                 handle
@@ -355,22 +364,14 @@ pub fn run(args: Args) -> Result<()> {
                     .map(|h| looks_like_snapshot(&h))
                     .unwrap_or(false)
             });
-        if !cache_ok || tick % FORCE_RESCAN_EVERY == 0 {
+        if !cache_ok {
             let fresh = locate_snapshot_addrs(&handle, start, end);
             if fresh.is_empty() {
-                if !cache_ok {
-                    // Genuinely stale (or nothing found yet, e.g. not
-                    // in a match) and the periodic sweep found nothing
-                    // new either — try again next tick.
-                    cached_addrs.clear();
-                    thread::sleep(Duration::from_millis(args.interval_ms));
-                    continue;
-                }
-                // Just the periodic sweep coming up empty (scan timing
-                // glitch); the existing cache still looks valid.
-            } else if fresh != cached_addrs {
-                cached_addrs = fresh;
+                cached_addrs.clear();
+                thread::sleep(Duration::from_millis(args.interval_ms));
+                continue;
             }
+            cached_addrs = fresh;
         }
 
         let snap_addr = cached_addrs
@@ -392,6 +393,22 @@ pub fn run(args: Args) -> Result<()> {
                 continue;
             }
         };
+
+        if snap.header.server_time != last_seen_server_time {
+            last_seen_server_time = snap.header.server_time;
+            last_change_wall = Instant::now();
+        } else if last_change_wall.elapsed() > STALL_RESCAN_AFTER {
+            // Frozen for too long to be a live match — either we
+            // launched before joining one, or this is a false-positive
+            // match on unrelated memory. Pay for a fresh scan now.
+            let fresh = locate_snapshot_addrs(&handle, start, end);
+            if !fresh.is_empty() {
+                cached_addrs = fresh;
+            }
+            last_change_wall = Instant::now();
+            thread::sleep(Duration::from_millis(args.interval_ms));
+            continue;
+        }
 
         // Wallhack's own eye/angles: cg.predictedPlayerState updates every
         // render frame via client-side prediction, so it's safe (and
