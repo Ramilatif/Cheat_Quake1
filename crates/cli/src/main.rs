@@ -35,6 +35,8 @@ enum Cmd {
     Hp(cmd::hp::Args),
     /// Pretty-print an arbitrary address as an entityState_t.
     Inspect(cmd::inspect::Args),
+    /// Unified aimbot + wallhack with an in-game settings menu (F1).
+    Menu(cmd::menu::Args),
     /// Scan a memory window for entityState_t-shaped bytes.
     Scan(cmd::scan::Args),
     /// Heap-wide scan for live player entities.
@@ -53,6 +55,7 @@ fn main() -> Result<()> {
         Cmd::Modules(a) => cmd::modules::run(a),
         Cmd::Hp(a) => cmd::hp::run(a),
         Cmd::Inspect(a) => cmd::inspect::run(a),
+        Cmd::Menu(a) => cmd::menu::run(a),
         Cmd::Scan(a) => cmd::scan::run(a),
         Cmd::Players(a) => cmd::players::run(a),
         Cmd::Snapshot(a) => cmd::snapshot::run(a),
