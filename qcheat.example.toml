@@ -1,0 +1,44 @@
+# Example configuration for `qcheat menu`.
+#
+# Copy this file to `qcheat.toml` in the directory you run qcheat
+# from (or pass --config <path> explicitly) to change the defaults
+# below without retyping flags on every launch. Every key is optional
+# — omit anything you don't want to change, it falls back to the
+# built-in default shown here. A CLI flag always overrides whatever
+# is in this file (e.g. `qcheat menu --sensitivity 8.0` wins even if
+# sensitivity is also set here).
+
+# Target executable name, matched via Toolhelp32.
+process = "ioquake3.x86_64.exe"
+
+# Loop tick rate in milliseconds. Lower = smoother aim/wallhack
+# tracking but more CPU/ReadProcessMemory overhead. 8 = ~120Hz.
+interval_ms = 8
+
+# In-game `m_yaw` / `m_pitch` cvars — check yours with the in-game
+# console (`\m_yaw`, `\m_pitch`). Needed to convert a desired angle
+# correction into the right number of raw mouse counts.
+m_yaw = 0.022
+m_pitch = 0.022
+
+# Virtual-key codes (decimal, or "0x.." hex) for the two hotkeys.
+# Common values: F1=0x70/112, F2=0x71, Insert=0x2D/45, Home=0x24/36.
+# See Microsoft's "Virtual-Key Codes" reference for the full list.
+menu_key = "0x70"    # opens/closes the in-game settings menu
+aimbot_key = "0x2D"  # quick-toggles the aimbot, even with the menu closed
+
+# Aimbot starting state.
+aimbot_enabled = true
+sensitivity = 5.0     # matches your in-game `sensitivity` cvar
+smooth = 0.15         # fraction of the remaining angle error corrected per tick
+max_delta = 60.0      # hard cap on raw mouse counts sent in a single tick
+
+# Target-selection mode: "closest" or "smallest_angle".
+# ("Lowest HP" from the original plan isn't possible — entityState_t
+# never carries another player's health over the network, only your
+# own. See docs/reverse-engineering.md.)
+target_mode = "closest"
+
+# Wallhack (ESP overlay) starting state.
+esp_enabled = true
+fov = 90.0  # matches your in-game `cg_fov` cvar, for correct box projection

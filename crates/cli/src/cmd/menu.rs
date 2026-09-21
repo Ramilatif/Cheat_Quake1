@@ -36,7 +36,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use crate::util::{parse_hex, DEFAULT_PROCESS};
+use crate::util::parse_hex;
 
 const CHUNK: usize = 4096;
 const HEADER_SIZE: usize = core::mem::size_of::<sdk::SnapshotHeader>();
@@ -59,10 +59,20 @@ const VK_UP: i32 = 0x26;
 const VK_RIGHT: i32 = 0x27;
 const VK_DOWN: i32 = 0x28;
 
+// Every tunable below defaults to `None` on the CLI side rather than
+// carrying its own `default_value` — the *actual* default lives in
+// `config::MenuConfig::default()`, sourced through `qcheat.toml` if
+// one exists. A flag passed on the command line always wins over the
+// file, which always wins over the built-in default; see `run()`.
 #[derive(ClapArgs)]
 pub struct Args {
-    #[arg(long, default_value = DEFAULT_PROCESS)]
-    pub process: String,
+    /// Explicit path to a `qcheat.toml`. Without this, `./qcheat.toml`
+    /// is used if present, otherwise built-in defaults.
+    #[arg(long)]
+    pub config: Option<std::path::PathBuf>,
+
+    #[arg(long)]
+    pub process: Option<String>,
 
     #[arg(long, value_parser = parse_hex)]
     pub center: Option<usize>,
@@ -71,38 +81,70 @@ pub struct Args {
     pub range: Option<usize>,
 
     /// Loop tick rate (ms). 8 = ~120Hz.
-    #[arg(long, default_value = "8")]
-    pub interval_ms: u64,
+    #[arg(long)]
+    pub interval_ms: Option<u64>,
 
     /// In-game `m_yaw` cvar — calibration constant, not menu-editable.
-    #[arg(long, default_value = "0.022")]
-    pub m_yaw: f32,
+    #[arg(long)]
+    pub m_yaw: Option<f32>,
 
     /// In-game `m_pitch` cvar — calibration constant, not menu-editable.
-    #[arg(long, default_value = "0.022")]
-    pub m_pitch: f32,
+    #[arg(long)]
+    pub m_pitch: Option<f32>,
 
     /// Virtual-key code that opens/closes the menu (default: F1,
     /// 0x70). See Microsoft's Virtual-Key Codes docs for other
     /// values, e.g. 0x24 for Home, 0x2D for Insert.
-    #[arg(long, value_parser = parse_hex, default_value = "0x70")]
-    pub menu_key: usize,
+    #[arg(long, value_parser = parse_hex)]
+    pub menu_key: Option<usize>,
 
     /// Virtual-key code that quick-toggles the aimbot on/off, even
     /// with the menu closed (default: Insert, 0x2D).
-    #[arg(long, value_parser = parse_hex, default_value = "0x2D")]
-    pub aimbot_key: usize,
+    #[arg(long, value_parser = parse_hex)]
+    pub aimbot_key: Option<usize>,
 }
 
 /// Everything the menu can change live. Single-threaded — the menu,
 /// the aimbot correction, and the wallhack draw all run in one loop,
 /// so there's no locking to worry about.
+/// How the aimbot picks which tracked enemy to aim at.
+///
+/// A third mode, "lowest HP", was in the original plan but turned out
+/// not to be implementable: `entityState_t` never carries another
+/// player's health over the network — only your own, in your own
+/// `playerState_t.stats[STAT_HEALTH]`. `generic1` exists as a spare
+/// mod-defined field but carries no HP semantics in vanilla ioquake3.
+/// Nothing to read client-side, so nothing to add here.
+#[derive(Clone, Copy, PartialEq)]
+enum TargetMode {
+    Closest,
+    SmallestAngle,
+}
+
+const TARGET_MODE_NAMES: [&str; 2] = ["Closest", "Smallest angle"];
+
+impl TargetMode {
+    fn from_index(i: usize) -> Self {
+        match i {
+            0 => TargetMode::Closest,
+            _ => TargetMode::SmallestAngle,
+        }
+    }
+    fn index(self) -> usize {
+        match self {
+            TargetMode::Closest => 0,
+            TargetMode::SmallestAngle => 1,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Settings {
     aimbot_enabled: bool,
     sensitivity: f32,
     smooth: f32,
     max_delta: f32,
+    target_mode: TargetMode,
     esp_enabled: bool,
     fov: f32,
 }
@@ -114,6 +156,7 @@ impl Default for Settings {
             sensitivity: 5.0,
             smooth: 0.15,
             max_delta: 60.0,
+            target_mode: TargetMode::Closest,
             esp_enabled: true,
             fov: 90.0,
         }
@@ -135,9 +178,19 @@ struct SliderSpec {
     set: fn(&mut Settings, f32),
 }
 
+/// A row that cycles through a small fixed list of named options
+/// (e.g. target-selection mode) instead of a continuous range.
+struct CycleSpec {
+    label: &'static str,
+    options: &'static [&'static str],
+    get: fn(&Settings) -> usize,
+    set: fn(&mut Settings, usize),
+}
+
 enum MenuItem {
     Toggle(ToggleSpec),
     Slider(SliderSpec),
+    Cycle(CycleSpec),
 }
 
 fn menu_items() -> Vec<MenuItem> {
@@ -171,6 +224,12 @@ fn menu_items() -> Vec<MenuItem> {
             get: |s| s.max_delta,
             set: |s, v| s.max_delta = v,
         }),
+        MenuItem::Cycle(CycleSpec {
+            label: "Target",
+            options: &TARGET_MODE_NAMES,
+            get: |s| s.target_mode.index(),
+            set: |s, i| s.target_mode = TargetMode::from_index(i),
+        }),
         MenuItem::Toggle(ToggleSpec {
             label: "Wallhack",
             get: |s| s.esp_enabled,
@@ -197,7 +256,27 @@ struct Track {
 }
 
 pub fn run(args: Args) -> Result<()> {
-    let proc = process::find_by_name(&args.process)?;
+    // CLI flag > qcheat.toml > built-in default, in that order. See
+    // the doc comment on `Args` for why every flag here is `Option`.
+    let cfg = config::load_or_default(args.config.as_deref())
+        .with_context(|| "loading qcheat.toml".to_string())?;
+
+    let process_name = args.process.clone().unwrap_or_else(|| cfg.process.clone());
+    let interval_ms = args.interval_ms.unwrap_or(cfg.interval_ms);
+    let m_yaw = args.m_yaw.unwrap_or(cfg.m_yaw);
+    let m_pitch = args.m_pitch.unwrap_or(cfg.m_pitch);
+    let menu_key = match args.menu_key {
+        Some(k) => k,
+        None => config::parse_vkey(&cfg.menu_key)
+            .map_err(|e| anyhow::anyhow!("qcheat.toml menu_key: {e}"))?,
+    };
+    let aimbot_key = match args.aimbot_key {
+        Some(k) => k,
+        None => config::parse_vkey(&cfg.aimbot_key)
+            .map_err(|e| anyhow::anyhow!("qcheat.toml aimbot_key: {e}"))?,
+    };
+
+    let proc = process::find_by_name(&process_name)?;
     let handle = process::ProcessHandle::open(proc.pid)?;
 
     let center = args.center.unwrap_or(DEFAULT_CENTER);
@@ -214,11 +293,23 @@ pub fn run(args: Args) -> Result<()> {
 
     println!(
         "qcheat menu on {} (pid {}). vkey 0x{:02X}: open/close menu, vkey 0x{:02X}: quick aimbot toggle.",
-        proc.name, proc.pid, args.menu_key, args.aimbot_key
+        proc.name, proc.pid, menu_key, aimbot_key
     );
     println!("In the menu: UP/DOWN select, LEFT/RIGHT adjust. Ctrl+C here to quit.\n");
 
-    let mut settings = Settings::default();
+    let mut settings = Settings {
+        aimbot_enabled: cfg.aimbot_enabled,
+        sensitivity: cfg.sensitivity,
+        smooth: cfg.smooth,
+        max_delta: cfg.max_delta,
+        target_mode: if cfg.target_mode == "smallest_angle" {
+            TargetMode::SmallestAngle
+        } else {
+            TargetMode::Closest
+        },
+        esp_enabled: cfg.esp_enabled,
+        fov: cfg.fov,
+    };
     let items = menu_items();
     let mut selected: usize = 0;
     let mut menu_open = false;
@@ -298,7 +389,7 @@ pub fn run(args: Args) -> Result<()> {
         }
 
         // --- hotkeys ---
-        let home_down = key_down(args.menu_key as i32);
+        let home_down = key_down(menu_key as i32);
         if home_down && !home_was_down {
             menu_open = !menu_open;
             // Block click-through while the menu is up so a stray
@@ -308,7 +399,7 @@ pub fn run(args: Args) -> Result<()> {
         }
         home_was_down = home_down;
 
-        let insert_down = key_down(args.aimbot_key as i32);
+        let insert_down = key_down(aimbot_key as i32);
         if insert_down && !insert_was_down {
             settings.aimbot_enabled = !settings.aimbot_enabled;
         }
@@ -346,6 +437,17 @@ pub fn run(args: Args) -> Result<()> {
                         (s.set)(&mut settings, v);
                     }
                 }
+                MenuItem::Cycle(c) => {
+                    let n = c.options.len();
+                    if left && !left_was_down {
+                        let i = (c.get)(&settings);
+                        (c.set)(&mut settings, (i + n - 1) % n);
+                    }
+                    if right && !right_was_down {
+                        let i = (c.get)(&settings);
+                        (c.set)(&mut settings, (i + 1) % n);
+                    }
+                }
             }
             left_was_down = left;
             right_was_down = right;
@@ -368,7 +470,7 @@ pub fn run(args: Args) -> Result<()> {
             let fresh = locate_snapshot_addrs(&handle, start, end);
             if fresh.is_empty() {
                 cached_addrs.clear();
-                thread::sleep(Duration::from_millis(args.interval_ms));
+                thread::sleep(Duration::from_millis(interval_ms));
                 continue;
             }
             cached_addrs = fresh;
@@ -389,7 +491,7 @@ pub fn run(args: Args) -> Result<()> {
             Ok(s) => Box::new(s),
             Err(_) => {
                 cached_addrs.clear();
-                thread::sleep(Duration::from_millis(args.interval_ms));
+                thread::sleep(Duration::from_millis(interval_ms));
                 continue;
             }
         };
@@ -406,7 +508,7 @@ pub fn run(args: Args) -> Result<()> {
                 cached_addrs = fresh;
             }
             last_change_wall = Instant::now();
-            thread::sleep(Duration::from_millis(args.interval_ms));
+            thread::sleep(Duration::from_millis(interval_ms));
             continue;
         }
 
@@ -477,13 +579,20 @@ pub fn run(args: Args) -> Result<()> {
         // --- aimbot ---
         if settings.aimbot_enabled {
             if let (Some(oy), Some(op)) = (own_yaw, own_pitch) {
-                let closest = extrapolated.iter().min_by(|a, b| {
-                    dist_sq(aim_local_pos, a.1)
-                        .partial_cmp(&dist_sq(aim_local_pos, b.1))
-                        .unwrap()
-                });
+                let target = match settings.target_mode {
+                    TargetMode::Closest => extrapolated.iter().min_by(|a, b| {
+                        dist_sq(aim_local_pos, a.1)
+                            .partial_cmp(&dist_sq(aim_local_pos, b.1))
+                            .unwrap()
+                    }),
+                    TargetMode::SmallestAngle => extrapolated.iter().min_by(|a, b| {
+                        angle_error_magnitude(aim_local_pos, oy, op, a.1)
+                            .partial_cmp(&angle_error_magnitude(aim_local_pos, oy, op, b.1))
+                            .unwrap()
+                    }),
+                };
 
-                if let Some(&(_, target_pos)) = closest {
+                if let Some(&(_, target_pos)) = target {
                     let (target_yaw, target_pitch) = calculate_angles(aim_local_pos, target_pos);
                     let err_yaw = normalize_angle(target_yaw - oy);
                     let err_pitch = normalize_angle(target_pitch - op);
@@ -491,8 +600,8 @@ pub fn run(args: Args) -> Result<()> {
                     let move_yaw = err_yaw * settings.smooth;
                     let move_pitch = err_pitch * settings.smooth;
 
-                    let deg_per_count_yaw = settings.sensitivity * args.m_yaw;
-                    let deg_per_count_pitch = settings.sensitivity * args.m_pitch;
+                    let deg_per_count_yaw = settings.sensitivity * m_yaw;
+                    let deg_per_count_pitch = settings.sensitivity * m_pitch;
 
                     // cl_input.c: `cl.viewangles[YAW] -= m_yaw * mx`.
                     let mut dx = -(move_yaw / deg_per_count_yaw).round() as i32;
@@ -544,10 +653,10 @@ pub fn run(args: Args) -> Result<()> {
             &items,
             selected,
             &settings,
-            args.menu_key,
+            menu_key,
         );
 
-        thread::sleep(Duration::from_millis(args.interval_ms));
+        thread::sleep(Duration::from_millis(interval_ms));
     }
 }
 
@@ -582,6 +691,17 @@ fn calculate_angles(from: Vec3, to: Vec3) -> (f32, f32) {
     let pitch = (-dz).atan2(horiz_dist).to_degrees();
 
     (yaw, pitch)
+}
+
+/// Combined angular distance between the current aim (`own_yaw`,
+/// `own_pitch`) and the direction to `target`, for the "smallest
+/// angle" target-selection mode — how far off-crosshair a candidate
+/// currently is, not how far away in world units.
+fn angle_error_magnitude(from: Vec3, own_yaw: f32, own_pitch: f32, target: Vec3) -> f32 {
+    let (target_yaw, target_pitch) = calculate_angles(from, target);
+    let err_yaw = normalize_angle(target_yaw - own_yaw);
+    let err_pitch = normalize_angle(target_pitch - own_pitch);
+    err_yaw * err_yaw + err_pitch * err_pitch
 }
 
 fn send_mouse_delta(dx: i32, dy: i32) {
@@ -935,6 +1055,9 @@ fn draw_frame(
                         format!("{marker} {}: {}", t.label, if (t.get)(settings) { "ON" } else { "OFF" })
                     }
                     MenuItem::Slider(s) => format!("{marker} {}: {:.2}", s.label, (s.get)(settings)),
+                    MenuItem::Cycle(c) => {
+                        format!("{marker} {}: {}", c.label, c.options[(c.get)(settings)])
+                    }
                 };
                 SetTextColor(
                     hdc,
