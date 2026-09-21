@@ -13,6 +13,7 @@
 
 pub mod aim_mouse;
 pub mod aimbot;
+pub mod doctor;
 pub mod esp;
 pub mod find;
 pub mod find_viewangles;
