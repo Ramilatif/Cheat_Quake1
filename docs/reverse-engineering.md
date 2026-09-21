@@ -1,11 +1,14 @@
-# Reverse engineering de ioquake3 — du process Windows à la liste des joueurs
+# Reverse engineering de ioquake3 — du process Windows au cheat complet
 
-Ce document retrace la démarche concrète qui mène à `dump-snapshot` :
-comment, à partir d'un seul `ioquake3.x86_64.exe` qui tourne et de la
-seule connaissance que "quelque part en mémoire il y a une liste de
-joueurs", on en arrive à lire **frame par frame** la position et le HP
-de chaque joueur visible. Et où se trouve la limite que rien ne peut
-contourner côté client.
+Ce document retrace la démarche concrète depuis un seul
+`ioquake3.x86_64.exe` qui tourne et la seule connaissance que "quelque
+part en mémoire il y a une liste de joueurs", jusqu'à un aimbot et un
+wallhack pilotés par un menu en jeu (`qcheat menu`) : lire **frame par
+frame** la position et le HP de chaque joueur visible (§1-8), piloter
+la visée sans jamais écrire en mémoire (§9-11), projeter cette même
+donnée en 2D par-dessus le jeu (§12), et réunir le tout dans une seule
+boucle robuste (§13). Et où se trouvent les limites que rien ne peut
+contourner côté client (§7).
 
 ---
 
@@ -317,15 +320,350 @@ Ce qu'on a appris en pratique en allant du HP à la liste des joueurs :
 
 ---
 
-## 9. Pour aller plus loin
+## 9. L'aimbot, tentative 1 : écrire l'angle en mémoire (échec)
+
+Une fois `cg.snap` localisé (§5), l'étape suivante paraît triviale :
+calculer `atan2(dy, dx)` vers l'ennemi le plus proche, puis écrire ce
+yaw/pitch directement dans la copie qu'on lit. `WriteProcessMemory`
+marche très bien techniquement — le problème, c'est que **rien ne lit
+plus jamais cette valeur**.
+
+### Les fausses pistes, dans l'ordre où elles ont été essayées
+
+1. **`cl.snapshots[PACKET_BACKUP]`** (le ring buffer d'historique côté
+   engine, 32 entrées espacées de `sizeof(clSnapshot_t) = 540 B`).
+   Écrire dedans ne fait rien : en suivant "find out what writes to
+   this address" dans Cheat Engine, l'écriture retombe systématiquement
+   dans `msvcrt.memcpy` — c'est juste une copie brute de paquet réseau
+   vers l'historique, jamais relue pour le rendu. Fréquence de
+   correction : celle du tick serveur, pas celle du rendu.
+2. **Une adresse sur la pile.** Même technique de traçage, cette fois
+   le writer était une vraie fonction du jeu (prologue `push
+   rbp/rdi/rsi/rbx` propre, pas `msvcrt`) — mais la destination était à
+   quelques octets de `RSP` au moment du hit. Une variable locale
+   temporaire, réutilisée à chaque appel de fonction suivant : écrire
+   dedans est sans effet dès la frame suivante.
+3. **Un miroir en tas (heap), trouvé par recoupement de deux scans
+   "changed value" indépendants.** Cette adresse suit parfaitement
+   l'angle réel et se corrige *immédiatement* si on la modifie — donc
+   elle est bien lue quelque part et recalculée chaque frame. Mais même
+   en la figeant avec **Freeze** dans Cheat Engine (force la valeur en
+   continu, contourne le problème "une seule écriture s'efface"), la
+   caméra ne bouge pas. Conclusion : c'est encore une copie miroir,
+   pas la source consommée par le renderer.
+
+### La vraie explication, trouvée dans le source
+
+`code/client/cl_input.c`, `CL_MouseMove` :
+
+```c
+mx *= cl_sensitivity->value;
+my *= cl_sensitivity->value;
+mx *= cl.cgameSensitivity;
+my *= cl.cgameSensitivity;
+
+cl.viewangles[YAW]   -= m_yaw->value   * mx;
+cl.viewangles[PITCH] += m_pitch->value * my;
+```
+
+Et `code/game/bg_pmove.c`, `PM_UpdateViewAngles` — appelée à **chaque
+frame de prédiction client**, pas à chaque tick réseau
+(`cg_predict.c: CG_PredictPlayerState`) :
+
+```c
+temp = cmd->angles[i] + ps->delta_angles[i];
+ps->viewangles[i] = SHORT2ANGLE(temp);
+```
+
+Autrement dit : `cg.predictedPlayerState.viewangles` (donc aussi
+`cg.snap.ps.viewangles`, sa copie) est **recalculé toutes les frames**
+à partir de `cmd->angles`, lui-même dérivé de `cl.viewangles`, lui-même
+piloté par le delta de souris brut. Écrire dans n'importe quelle copie
+de l'angle est annulé à la frame suivante, que l'écriture réussisse ou
+non — le moteur ne lit jamais notre valeur, il **recalcule** la
+sienne depuis l'input.
+
+C'est une limite de la même famille que le PVS (§7) : pas une
+protection anti-triche explicite, une conséquence directe de
+l'architecture (prédiction client-side pour masquer la latence
+réseau). Contourner ça en modifiant encore plus de mémoire (patcher
+`cl.viewangles`, ou `cmd->angles` avant qu'il soit consommé) revient à
+courir après une valeur recalculée en boucle fermée toutes les ~8 ms —
+fragile et pas nécessaire.
+
+---
+
+## 10. L'aimbot, tentative 2 : piloter la souris, pas la mémoire
+
+Si le moteur recalcule l'angle depuis l'input souris, la solution est
+de fournir cet input nous-mêmes plutôt que d'essayer de forcer sa
+sortie. Windows expose `SendInput` (`user32.dll`, via
+`windows::Win32::UI::Input::KeyboardAndMouse`) : un mouvement de
+souris relatif synthétique, indiscernable pour le jeu d'un vrai
+mouvement de souris physique, puisqu'il traverse exactement le même
+chemin (`CL_MouseMove` lit le delta accumulé, quelle que soit sa
+source).
+
+```rust
+let input = INPUT {
+    r#type: INPUT_MOUSE,
+    Anonymous: INPUT_0 { mi: MOUSEINPUT { dx, dy, dwFlags: MOUSEEVENTF_MOVE, .. } },
+};
+SendInput(&[input], size_of::<INPUT>() as i32);
+```
+
+Plus besoin de trouver la bonne adresse : on ne lit plus jamais que
+`cg.snap.ps.origin`/`viewangles` (déjà localisés en §5) pour connaître
+la position/l'angle actuels, et on pousse un delta de souris calculé à
+partir de l'écart avec l'angle voulu.
+
+### Piège de signe : `cl_input.c` inverse le yaw
+
+Première version : la caméra tourne, mais **s'éloigne** de la cible au
+lieu de s'en rapprocher. En relisant `CL_MouseMove` (§9) :
+
+```c
+cl.viewangles[YAW] -= m_yaw->value * mx;   // mx positif (souris à droite) DIMINUE le yaw
+```
+
+Le calcul du delta de souris à envoyer doit donc **inverser** le signe
+de l'erreur de yaw calculée (alors que pour le pitch, `+=` correspond
+directement à la convention "souris vers le bas augmente le pitch =
+regarde vers le bas", pas d'inversion nécessaire). Un bug de signe
+d'apparence anodine, mais qui pousse activement la visée dans la
+mauvaise direction à chaque tick — largement plus trompeur qu'une
+correction qui ne fait simplement rien.
+
+### Deux bugs de ciblage, indépendants du calcul d'angle
+
+- **Se cibler soi-même.** `cg.snap.entities[]` contient aussi
+  l'entité du joueur local — sans l'exclure (comparaison sur
+  `client_num == ps.client_num`), elle "gagne" toujours comme cible la
+  plus proche, distance 0.
+- **Cibler un cadavre.** `entityState_t.eFlags & EF_DEAD` (bit
+  `0x00000001`, défini dans `bg_public.h`) indique un joueur mort.
+  Sans ce filtre, l'aimbot continue de suivre un corps au sol.
+
+---
+
+## 11. Lisser le mouvement : le décalage entre tick serveur et boucle de poll
+
+Une fois la visée fonctionnelle, la caméra tremble. Cause : le serveur
+Quake III n'envoie un nouveau snapshot qu'au rythme de `sv_fps`
+(~20-40 Hz), largement en dessous de la boucle de poll externe
+(~120 Hz à 8 ms/tick). Recalculer une correction à chaque poll sur la
+**même** donnée périmée revient à envoyer plusieurs fois la même
+commande avant que son effet précédent ne soit visible — le classique
+excès de correction (overshoot) d'une boucle asservie à laquelle on ne
+laisse pas le temps de "voir" son propre effet.
+
+La solution retenue est la même que celle que le moteur utilise
+lui-même pour l'affichage (interpolation entre deux `clSnapshot_t`,
+`LerpAngle` dans `cg_predict.c`) : **prédire** entre deux vraies mises
+à jour plutôt que de rejouer l'ancienne donnée.
+
+- **Position de la cible** : extrapolation linéaire par vélocité.
+  À chaque vrai changement de `serverTime`, on calcule
+  `vel = (nouvelle_position - ancienne_position) / dt_serveur`
+  (`entityState_t` n'expose pas de vélocité utilisable directement
+  pour un joueur — `trType` vaut `TR_INTERPOLATE`, pas
+  `TR_LINEAR` — donc on la déduit nous-mêmes de deux échantillons
+  successifs). À chaque tick de la boucle, on projette
+  `position = dernière_position + vel × temps_écoulé_réel`.
+- **Notre propre angle** : `cg.snap.ps.viewangles` reflète en réalité
+  `cg.predictedPlayerState`, recalculé chaque frame de rendu (§9) — le
+  relire à chaque tick serait donc déjà suffisant en théorie. Mais la
+  version qui fonctionne intègre plutôt localement l'angle en
+  additionnant les corrections déjà envoyées (`own_yaw -= deg_par_count
+  × dx_envoyé`), et ne **resynchronise** sur la valeur lue qu'à chaque
+  vrai nouveau `serverTime`. Ça évite tout effet de bord si la lecture
+  a un cycle de retard, et ça reste cohérent avec l'extrapolation
+  utilisée côté cible.
+
+Effet : à chaque tick, l'erreur angle-cible évolue un peu (au lieu de
+rester identique plusieurs polls de suite), donc chaque correction
+envoyée est petite et cohérente avec la précédente — mouvement lissé,
+sans jamais dépendre de la fréquence réseau du serveur.
+
+---
+
+## 12. Le wallhack : projeter le snapshot en 2D par-dessus le jeu
+
+`cg.snap.entities[]` contient déjà la position de **tous** les
+ennemis dans le PVS (§7), visibles ou non à l'écran — l'occlusion par
+les murs est une décision de rendu, pas une propriété de la donnée.
+Un ESP "boîtes à travers les murs" est donc juste un problème de
+projection 3D → 2D, pas de nouvelle lecture mémoire.
+
+### Projection : refaire `AngleVectors` à la main
+
+Le moteur calcule sa base caméra (avant/droite/haut) depuis yaw/pitch
+avec `AngleVectors` (`q_math.c`). En Rust, roll supposé nul :
+
+```rust
+let forward = Vec3::new(cp * cy, cp * sy, -sp);
+let right   = Vec3::new(sy, -cy, 0.0);
+let up      = Vec3::new(sp * cy, sp * sy, cp);
+```
+
+Puis projection perspective classique : projeter le vecteur
+`cible - œil` sur cette base (`cx, cy, cz`), rejeter si `cz < 1`
+(derrière la caméra), et mettre à l'échelle avec le FOV :
+
+```rust
+let scale = (largeur_écran * 0.5) / (fov_rad * 0.5).tan();
+let sx = largeur/2.0 + cx * scale / cz;
+let sy = hauteur/2.0 - cy * scale / cz;
+```
+
+Une boîte par joueur se construit en projetant deux points (pieds =
+`pos.trBase`, tête = pieds + hauteur approx.) plutôt qu'un point unique
++ taille fixe — la boîte se met alors à l'échelle correctement avec la
+distance sans calcul supplémentaire.
+
+### Fenêtre overlay : transparente, cliquable-à-travers, toujours au-dessus
+
+Une fenêtre Win32 classique (`WS_POPUP`), avec :
+
+- `WS_EX_LAYERED` + `SetLayeredWindowAttributes(.., LWA_COLORKEY)` :
+  une couleur clé (noir) devient transparente au rendu — on dessine le
+  fond en noir puis les formes par-dessus en GDI (`Rectangle`,
+  `TextOutW`), sans double buffering (léger scintillement accepté).
+- `WS_EX_TRANSPARENT` : les clics souris traversent la fenêtre vers le
+  jeu en dessous — indispensable pour ne pas gêner le gameplay.
+- `WS_EX_TOPMOST` : reste au-dessus du jeu.
+
+Piège découvert à l'usage : **Windows démet une fenêtre topmost avec
+le temps** (le jeu reprend le focus, alt-tab, une notification passe)
+si on ne demande `HWND_TOPMOST` qu'une fois à la création — l'overlay
+finit par disparaître derrière le jeu après quelques minutes. Fix :
+réaffirmer `SetWindowPos(.., HWND_TOPMOST, ..)` à **chaque tick**
+(appel `SWP_NOMOVE|SWP_NOSIZE`, quasi gratuit).
+
+La même extrapolation par vélocité que pour l'aimbot (§11) s'applique
+ici pour que les boîtes suivent les ennemis sans à-coups entre deux
+vrais snapshots, sur une `HashMap<client_num, Track>` (une entrée par
+ennemi, purgée dès qu'il n'apparaît plus dans un vrai snapshot — mort,
+déconnecté, sorti du PVS).
+
+---
+
+## 13. Tout réunir : un menu en jeu au lieu de relancer la CLI
+
+Aimbot et wallhack tournaient d'abord comme deux commandes séparées,
+chacune avec son propre scan mémoire et ses propres réglages figés au
+lancement (`--sensitivity`, `--fov`, ...). Les fusionner en une seule
+boucle (`qcheat menu`) apporte deux choses : un seul scan mémoire
+partagé, et des réglages modifiables **en direct**, en jeu.
+
+### Pourquoi le menu se pilote au clavier, pas à la souris
+
+Le jeu capture et cache le curseur système en continu pour le
+mouselook (et l'overlay ne peut rien y changer sans se battre avec le
+moteur). `GetCursorPos` renverrait donc une position sans rapport avec
+"où l'utilisateur regarde/pointe" pendant une partie active. Plus
+simple et plus robuste : navigation entièrement clavier (haut/bas =
+sélection, gauche/droite = ajustement), interrogée par polling
+(`GetAsyncKeyState`, comme la touche de bascule de l'aimbot) — pas de
+dépendance au focus de fenêtre ni au curseur.
+
+### Une seule structure de réglages, un seul thread
+
+```rust
+struct Settings {
+    aimbot_enabled: bool,
+    sensitivity: f32,
+    smooth: f32,
+    max_delta: f32,
+    esp_enabled: bool,   // affiché "Wallhack" dans le menu
+    fov: f32,
+}
+```
+
+Le menu, la correction d'aimbot et le dessin des boîtes tournent dans
+la **même** itération de boucle, dans le même thread — pas de
+`Arc<Mutex<..>>`, juste une struct mutée directement. Ça élimine toute
+question de synchronisation entre "ce que le menu vient de changer" et
+"ce que la frame suivante applique".
+
+### Le compromis rescan : ne jamais bloquer sur un scan mémoire complet
+
+Lancer l'outil **avant** de rejoindre une partie pose un problème
+propre : `cg.activeSnapshots` n'existe pas encore, et un scan large
+peut ponctuellement matcher un bloc de mémoire qui *ressemble* à un
+snapshot (passe les filtres de plausibilité de `looks_like_snapshot`)
+sans en être un vrai — les deux se traduisent par un cache qui reste
+"valide" indéfiniment sans jamais correspondre à une vraie partie.
+
+Première tentative : forcer un rescan complet toutes les ~5 secondes,
+peu importe l'état du cache. Ça corrige bien le cas "lancé trop tôt",
+mais un scan complet de la fenêtre mémoire prend ~1-2 secondes de
+`ReadProcessMemory` — réintroduit exactement le symptôme qu'on
+cherchait à éviter, sous forme de coupures périodiques de 2 secondes
+pendant une partie par ailleurs saine.
+
+Fix retenu : ne déclencher le rescan coûteux que si `serverTime` **n'a
+pas avancé depuis plusieurs secondes** — signature exacte d'un
+snapshot figé (pas encore en partie, ou faux positif), jamais observée
+pendant une partie active où le serveur tique en continu. Ce check ne
+coûte rien (on lit déjà `serverTime` à chaque frame) et ne déclenche le
+scan lourd que quand c'est réellement nécessaire :
+
+```rust
+if snap.header.server_time != last_seen_server_time {
+    last_seen_server_time = snap.header.server_time;
+    last_change_wall = Instant::now();
+} else if last_change_wall.elapsed() > Duration::from_secs(3) {
+    // figé depuis trop longtemps pour être une partie active — rescanner
+}
+```
+
+Le même principe (rafraîchir seulement quand une valeur cesse
+d'évoluer, jamais sur une minuterie aveugle) s'applique à la taille et
+la position de la fenêtre du jeu, pour rattraper le cas où l'outil est
+lancé pendant un écran de chargement à une résolution différente de
+celle de la partie.
+
+---
+
+## 14. Synthèse mise à jour
+
+Ce qui s'ajoute aux leçons du §8 en poussant jusqu'à l'aimbot et
+l'overlay :
+
+7. **Une valeur qui se corrige toute seule n'est pas forcément la
+   bonne source.** Elle peut être recalculée depuis une source encore
+   plus en amont (ici : l'input souris) à laquelle il faut s'adresser
+   directement plutôt que de continuer à chasser des copies.
+8. **Piloter l'input plutôt que forcer l'état** est plus robuste
+   qu'écraser une valeur en mémoire quand cette valeur est
+   recalculée en boucle fermée par le moteur — ça élimine toute la
+   classe de bugs "où est la vraie adresse".
+9. **Un correcteur qui tourne plus vite que sa source de vérité doit
+   prédire, pas répéter.** Rejouer la même erreur plusieurs fois avant
+   d'en voir l'effet cause de l'oscillation, quelle que soit la
+   qualité du calcul de correction lui-même.
+10. **Un rescan de sécurité doit être déclenché par un symptôme réel
+    (donnée figée), jamais par une minuterie aveugle** — sinon le
+    remède coûte aussi cher que le problème qu'il corrige.
+
+---
+
+## 15. Pour aller plus loin
 
 - Implémenter la lecture côté serveur (`g_entities[]`) pour les
-  parties locales — voir limite §7.
-- Boucler `dump-snapshot` à 10 Hz pour avoir un radar live.
-- Calculer le `pitch/yaw` vers chaque ennemi (`atan2(dy, dx)` et
-  `atan2(dz, dist_xy)`) — première brique d'un aim-helper.
-- Cacher l'adresse de `cg.snap` trouvée pour éviter le scan complet à
-  chaque run, avec re-validation par `serverTime` croissant.
+  parties locales — voir limite §7. Reste la seule vraie façon de
+  dépasser le PVS.
+- Chams / vrai wallhack par patch du rendu (désactiver le depth-test
+  ou le culling pour les joueurs) — nécessiterait de sortir de
+  l'architecture 100% lecture externe (`ReadProcessMemory`/
+  `SendInput`) suivie jusqu'ici, vers de l'injection de code.
+- Sauvegarder/charger les `Settings` du menu dans un fichier
+  (`qcheat.toml`) pour ne pas repartir des valeurs par défaut à chaque
+  lancement.
+- Double-buffering pour le dessin de l'overlay (actuellement du GDI
+  direct sans back-buffer, léger scintillement visible).
 
-Ces extensions ne changent pas la limite PVS ; elles s'empilent toutes
-sur les données déjà visibles dans le snapshot.
+Ces extensions ne changent pas la limite PVS (§7) ni le fait que le
+moteur recalcule l'angle depuis l'input (§9) ; elles s'empilent sur
+l'architecture lecture-externe + injection d'input déjà en place.
