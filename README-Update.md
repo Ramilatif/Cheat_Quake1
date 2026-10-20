@@ -20,7 +20,8 @@ The project is a hands-on study of memory reverse-engineering: mirroring C struc
 8. [Testing](#testing)
 9. [Known limitations](#known-limitations)
 10. [Documentation](#documentation)
-11. [License](#license)
+11. [References](#reference)
+12. [License](#license)
 
 ---
 
@@ -243,6 +244,16 @@ All files below are in French.
 
 ---
 
+## References
+
+    ioquake3 source — code/qcommon/q_shared.h, code/cgame/cg_public.h, code/client/client.h
+    windows-rs — ReadProcessMemory, Toolhelp32 bindings
+    bytemuck — safe Pod casting
+
+Some documentation files may describe work in progress or planned features and may not yet exist in the repository.
+
+---
+
 ## License
 
-MIT for the project code. Structure names, sizes, and offsets come from the public ioquake3 headers (GPL-2.0); no ioquake3 code is included.
+MIT. ioquake3 is GPL-2.0 and remains the property of its authors; none of its code is included or redistributed here.
