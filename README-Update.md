@@ -1,47 +1,186 @@
-# Cheat_Quake1 (`qcheat`)
+# Cheat_Quake1 — `qcheat`
 
-Boîte à outils Rust **externe** (hors processus) pour étudier un client **ioquake3** en cours d'exécution sous Windows x86_64 : position, HP, angles de vue, liste des entités, et, au-delà de la lecture, visée assistée et overlay. C'est une **preuve de concept fonctionnelle en conditions réelles** : elle montre qu'avec des outils simples et une cible sans protection, un vrai cheat se construit. Projet d'apprentissage autour du reverse-engineering, du scan mémoire et de la correspondance octet par octet entre structures C et structures Rust.
+External Rust toolkit for reading and steering a running **ioquake3** client on Windows x86_64. It attaches to the game process from the outside, locates the engine's data structures in memory, and builds on them: entity dumps, aim assistance, a screen overlay, and a comparison between what the server knows and what the client receives.
 
-ioquake3 est sous licence GPL-2.0. Ce dépôt ne redistribue aucun de ses codes.
+The project is a hands-on study of memory reverse-engineering: mirroring C structures byte for byte in Rust, finding them again by signature in a heap whose addresses change on every launch, and reading the client/server split of a real-time game.
 
-> **Périmètre.** Recherche pédagogique, utilisée par l'auteur uniquement sur une partie **locale** (`/devmap` + `/addbot`), contre des **bots**, sur sa propre machine. Le code n'est pas distribué et n'est pas destiné à un usage en ligne. Voir [Usage responsable](#usage-responsable).
+> **Language note.** This README is in English. The detailed technical documents (`docs/`) are written in French.
 
 ---
 
-## Ce que fait réellement le projet
+## Contents
 
-Le binaire unique `qcheat` expose 12 sous-commandes. Elles se répartissent en trois familles.
+1. [Features](#features)
+2. [Requirements](#requirements)
+3. [Quick start](#quick-start)
+4. [Command reference](#command-reference)
+5. [How it works](#how-it-works)
+6. [Repository layout](#repository-layout)
+7. [Architecture](#architecture)
+8. [Testing](#testing)
+9. [Known limitations](#known-limitations)
+10. [Documentation](#documentation)
+11. [License](#license)
 
-### Lecture seule (étude)
+---
 
-| Commande | Rôle |
-|---|---|
-| `find` | Trouve le processus, affiche PID et base du module principal. |
-| `modules [--filter]` | Liste les modules (exe + DLL) chargés. |
-| `hp <addr>` | Interroge un entier 32 bits à une adresse fixe (ex. HP côté moteur). |
-| `inspect <addr> --mode origin\|raw\|vec3` | Interprète une adresse comme `entityState_t`. |
-| `scan <center> [--range]` | Scanne une fenêtre pour des motifs `entityState_t` et détecte les arrays par stride. |
-| `players` | Scan du heap filtré sur les entités `ET_PLAYER`. |
-| `snapshot` | Localise `cg.activeSnapshots[2]` (signature : deux candidats espacés de 53 772 octets), puis affiche le joueur local et toutes les entités visibles. |
-| `server-entities` | **Listen server uniquement.** Retrouve `g_entities[]` (état autoritatif du serveur) en prenant les joueurs du snapshot client comme référence, déduit `sizeof(gentity_t)`, recoupe avec `sv.gentities` du moteur, puis liste les joueurs du serveur et marque ceux que le client n'a **pas** reçus (filtrés par le PVS). Contient un contrôle de cohérence qui s'arrête s'il détecte plusieurs joueurs non-bots. |
-| `find-viewangles` | Retrouve par élimination (valeur connue + rondes de confirmation pendant que tu bouges la souris) l'adresse du yaw de rendu. |
+## Features
 
-### Interaction avec le jeu (expérimental, à n'utiliser qu'en local)
-
-| Commande | Rôle | Remarque |
+| Area | What it does | Commands |
 |---|---|---|
-| `aimbot` | Vise le joueur le plus proche en **écrivant** les angles (`WriteProcessMemory`) dans les adresses de vue et dans 32 copies de snapshot. | Expérimental : les adresses écrites ne sont pas toutes celles qui alimentent le rendu (voir [limites](#limites-et-points-connus)). Pas de touche d'activation, tourne en boucle. |
-| `aim-mouse` | Calcule l'erreur angulaire vers le joueur le plus proche et envoie des déplacements de souris relatifs via `SendInput`. Lissage, plafond par tick, bascule par touche (Insert par défaut), prédiction de la cible entre deux snapshots. | N'écrit pas en mémoire : passe par le chemin d'entrée normal du jeu. Les entrées partent vers la fenêtre au premier plan. |
-| `esp` | Overlay transparent « click-through » dessinant des boîtes sur les joueurs de la snapshot, avec extrapolation linéaire entre deux snapshots. | Voir la limite PVS ci-dessous. |
+| Recon | Find the process, list its modules, poll a single value | `find`, `modules`, `hp` |
+| Memory | Interpret bytes as game structures, scan for them, dump the live snapshot | `inspect`, `scan`, `players`, `snapshot` |
+| Server | Read the server's authoritative entity array and compare it with the client's view | `server-entities` |
+| Aim | Locate the view-angle variable; steer the camera by memory write or by mouse input | `find-viewangles`, `aimbot`, `aim-mouse` |
+| Overlay | Draw boxes over the players of the current snapshot | `esp` |
 
-### Hors périmètre actuel
-Configuration `qcheat.toml`, TUI, `doctor`, logging structuré : **planifiés, non présents dans le code**. `server-entities` est écrit et testé sur mémoire simulée, **à valider en jeu** (voir `docs/server-reverse.md`).
+All features ship in a single executable, `qcheat`, with one self-documented subcommand per operation.
+
+---
+
+## Requirements
+
+- Windows 10/11, x86_64
+- Rust 1.77 or newer (`rustup` stable is fine)
+- ioquake3 (`ioquake3.x86_64.exe`) running a locally hosted map:
+  ```
+  /devmap q3dm17
+  /addbot sarge
+  ```
+  A hosted game keeps client and server code in one process, which `server-entities` relies on. All other commands only need a running client.
+
+---
+
+## Quick start
+
+```powershell
+cargo build --release
+.\target\release\qcheat.exe --help
+```
+
+`qcheat` is a console application: it must be started from PowerShell or cmd. Double-clicking from Explorer opens and closes a window immediately.
+
+Typical session, with the game running and a map loaded:
+
+```powershell
+qcheat find                       # PID and module base
+qcheat snapshot                   # locate the live snapshot, dump local player + visible entities
+qcheat server-entities            # compare the server's player list with the snapshot
+qcheat find-viewangles            # move the mouse while it runs
+qcheat aim-mouse                  # Insert toggles it
+qcheat esp --fov 90               # overlay
+```
+
+Absolute addresses inside the game heap change on every launch. Addresses relative to the executable base (RVA) stay valid for a given ioquake3 build.
+
+---
+
+## Command reference
+
+Every command accepts `--process <name>` (default `ioquake3.x86_64.exe`) and `--help`.
+
+### Recon
+
+| Command | Purpose |
+|---|---|
+| `find` | Report PID and main-module base address. |
+| `modules [--filter <text>]` | List loaded modules (exe and DLLs). |
+| `hp <addr>` | Poll a 32-bit integer at a fixed address (engine-side HP). |
+
+### Memory
+
+| Command | Purpose |
+|---|---|
+| `inspect <addr> --mode origin\|raw\|vec3` | Print an address as an `entityState_t`. |
+| `scan <center> [range]` | Scan a window (positional hex arguments, default half-range `0x80000`) for `entityState_t`-shaped blocks and detect arrays by stride. |
+| `players` | Heap-wide scan filtered on `ET_PLAYER` entities. |
+| `snapshot` | Locate `cg.activeSnapshots[2]` and print the local player and every visible entity. |
+
+`players` and `snapshot` scan the window `0x07000000 ± 0x02000000` by default; `--center` and `--range` (hex) override it.
+
+### Server
+
+| Command | Purpose |
+|---|---|
+| `server-entities` | Locate `g_entities[]` in a hosted game, infer `sizeof(gentity_t)`, cross-check against the engine's `sv.gentities`, then list every server-side player and flag those absent from the client snapshot (removed by PVS). |
+
+Useful flags: `--tolerance` (max client/server position gap, default 150), `--stride` (force `sizeof(gentity_t)`), `--sv-rva` (RVA of `sv.gentities`, skips the scan on later runs), `--center` / `--range`.
+
+### Aim
+
+| Command | Purpose |
+|---|---|
+| `find-viewangles` | Isolate the live view-angle variable by elimination over several rounds while the mouse moves. |
+| `aimbot` | Aim at the closest player by writing view angles into game memory. Experimental: some written addresses are copies that do not feed the renderer. |
+| `aim-mouse` | Compute the angular error to the closest player and send relative mouse movement through `SendInput`. Smoothing, per-tick cap, toggle key, and target prediction between snapshots. |
+
+`aim-mouse` defaults: `--sensitivity 5.0 --m-yaw 0.022 --m-pitch 0.022 --smooth 0.15 --max-delta 60 --interval-ms 8 --toggle-key 0x2D`. The sensitivity values must match the game's `sensitivity`, `m_yaw`, and `m_pitch` cvars. Input goes to the foreground window.
+
+### Overlay
+
+| Command | Purpose |
+|---|---|
+| `esp [--fov] [--interval-ms]` | Transparent click-through window projecting snapshot players to screen coordinates, with linear extrapolation between snapshots. |
+
+---
+
+## How it works
+
+**1. Process access.** `OpenProcess` returns a handle; `ReadProcessMemory` and `WriteProcessMemory` operate on the target from a separate process. No code runs inside the game.
+
+**2. Structure mirrors.** `entityState_t`, `playerState_t`, and `snapshot_t` are redefined in Rust with `#[repr(C)]`. Compile-time assertions fix their sizes (`EntityState` = 208, `PlayerState` = 468, `Snapshot` = 53 772) and key field offsets, so a mistake in a mirror breaks the build instead of producing garbage at runtime.
+
+**3. Finding the snapshot.** The cgame VM keeps `cg` in a dynamically allocated heap, so no fixed address exists. Each 4-byte-aligned offset is treated as a candidate `SnapshotHeader` and passed through range checks (`pm_type`, `clientNum`, `weapon`, origin, HP). Two candidates exactly 53 772 bytes apart identify `cg.activeSnapshots[0..2]`; the one with the larger `serverTime` is the active snapshot.
+
+**4. Entity positions.** For player entities the reliable position is `pos.trBase`; the plain `origin` field is zero for interpolated entities.
+
+**5. Server side.** The server only sends entities inside the client's PVS (potentially visible set), so the snapshot is a filtered view. `g_entities[]`, owned by the server module, holds all entities. In a hosted game it lives in the same process. It is found by matching snapshot players against memory (same entity number, close position, consistent shared block), inferring the array stride from two matches (`stride = Δaddress / Δnumber`), and confirming through the engine pointer `sv.gentities`.
+
+**6. Steering the camera.** `aimbot` writes angles directly. `aim-mouse` follows the game's own input path (mouse delta → view angles → renderer) and therefore lands on the variable the renderer actually uses.
+
+---
+
+## Repository layout
+
+```
+Cheat_Quake1/
+├── Cargo.toml                 workspace definition and shared dependencies
+├── offsets.json               struct sizes, field offsets, engine RVAs
+├── README.md
+├── LICENSE
+├── .github/workflows/ci.yml   Windows build + tests
+├── docs/                      detailed documents (French)
+│   ├── architecture.md
+│   ├── reverse-engineering.md
+│   ├── server-reverse.md
+│   ├── cahier-des-charges.md
+│   └── comprendre-le-projet.md
+└── crates/
+    ├── sdk/                   struct mirrors, constants, pure logic
+    │   └── src/  vector, trajectory, entitystate, playerstate, snapshot,
+    │             constants, server*, plausibility*
+    ├── process/               Windows process access
+    │   └── src/  discovery (Toolhelp32), handle (Read/WriteProcessMemory)
+    ├── scanner/               generic memory-scan primitives
+    │   └── src/  scan (aligned scan), stride (array detection)
+    └── cli/                   the `qcheat` binary
+        └── src/
+            ├── main.rs        argument parsing and dispatch
+            ├── util.rs        shared helpers (hex parsing, defaults)
+            ├── locate.rs*     shared snapshot locator
+            └── cmd/           one file per subcommand
+                find, modules, hp, inspect, scan, players, snapshot,
+                find_viewangles, aimbot, aim_mouse, esp,
+                server_entities*
+```
+
+Files marked `*` are the server-side additions and the shared locator.
 
 ---
 
 ## Architecture
 
-Quatre crates ; chaque flèche signifie « dépend de ».
+Four crates with one-way dependencies.
 
 ```
             cli (qcheat)
@@ -51,103 +190,59 @@ Quatre crates ; chaque flèche signifie « dépend de ».
                  +------+
 ```
 
-| Crate | Responsabilité | Dépend de |
+| Crate | Responsibility | Depends on |
 |---|---|---|
-| `sdk` | Miroirs `#[repr(C)]` : `Vec3`, `Trajectory`, `EntityState`, `PlayerState`, `Snapshot`/`SnapshotHeader`, `SharedEntity`/`EntityShared` (tête de `gentity_t`). Filtres de plausibilité communs (`plausibility`) et logique serveur pure (jumeau serveur, inférence du stride, règle « bots seulement »). Assertions de taille et d'offsets à la compilation. Aucune dépendance Windows, aucun I/O. | `bytemuck` |
-| `process` | Accès au processus externe : `ProcessHandle` (lecture **et écriture**), énumération Toolhelp32. Ne connaît pas Quake. | `windows`, `thiserror` |
-| `scanner` | Scan par chunks alignés avec prédicat fourni par l'appelant, détection de strides. Ne connaît pas Quake. | `process` |
-| `cli` | Binaire `qcheat`. Module `locate` : localisation du snapshot **commune** à toutes les commandes. Seule crate qui connaît à la fois Quake et l'API Windows (SendInput, GDI). | toutes |
+| `sdk` | `#[repr(C)]` mirrors with layout assertions; sanity filters; server-side pure logic (server twin matching, stride inference). No Windows API, no I/O. | `bytemuck` |
+| `process` | `ProcessHandle` (read and write) and process/module discovery. Knows nothing about Quake. | `windows`, `thiserror` |
+| `scanner` | Chunked aligned scan with a caller-supplied predicate; stride detection. Knows nothing about Quake. | `process` |
+| `cli` | The only crate that combines game knowledge and the Windows API (SendInput, GDI). | all |
 
-`offsets.json` regroupe les tailles de structures, les offsets de champs et les RVA du moteur observés.
+Rules:
+
+- Pure logic goes in `sdk` so it can be unit-tested on any machine.
+- A subcommand is one file in `cmd/` with `Args` and `run`; shared scan code goes in `locate.rs`.
+- Libraries return typed errors (`thiserror`); the CLI uses `anyhow`.
+- Public items in libraries are documented (`#![warn(missing_docs)]`).
+
+Details and a step-by-step reading order: [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
-## Build et utilisation
+## Testing
 
 ```powershell
-cargo build --release          # target\release\qcheat.exe
-cargo test --workspace         # sdk (16 tests : filtres, stride, règle bots) + scanner::stride (4)
-.\target\release\qcheat.exe --help
+cargo test --workspace
 ```
 
-`qcheat` est une application console : lance-la depuis PowerShell ou cmd (un double-clic ferme la fenêtre immédiatement).
-
-Flux typique, jeu lancé, carte chargée, bots présents :
-
-```powershell
-qcheat find
-qcheat snapshot
-qcheat inspect 0x0613F728 --mode raw     # adresse d'exemple : change à chaque lancement
-qcheat find-viewangles                   # puis bouger la souris pendant les rondes
-qcheat aim-mouse --toggle-key 0x2D       # Insert pour activer/désactiver
-qcheat esp --fov 90
-```
-
-Valeurs par défaut utiles : fenêtre de scan `0x07000000 ± 0x02000000` ; `aim-mouse` : `--sensitivity 5.0 --m-yaw 0.022 --m-pitch 0.022 --smooth 0.15 --max-delta 60 --interval-ms 8` ; `esp` : `--interval-ms 8 --fov 90`. Les paramètres de souris doivent correspondre à tes cvars `sensitivity`, `m_yaw`, `m_pitch`.
-
-> Les adresses absolues (heap QVM) changent à chaque lancement. Les RVA (relatifs à la base de l'exe) sont stables tant que le binaire ioquake3 n'est pas recompilé, et ceux du dépôt correspondent au build observé.
+Covered today: `sdk` (snapshot filters, server twin matching, stride inference; layout assertions run at compile time) and `scanner::stride`. Commands that need a live game are checked manually against a running ioquake3.
 
 ---
 
-## Comment ça marche
+## Known limitations
 
-**Pourquoi un scan par signature ?** Avec `cgame.qvm`, la structure `cg` vit dans le heap de la machine virtuelle QVM, dont l'adresse est dynamique. On ne peut pas coder une adresse en dur ; on cherche une forme.
-
-**La signature du snapshot.** Chaque offset aligné sur 4 octets est traité comme un `SnapshotHeader` candidat et passe un filtre de plausibilité (`pm_type`, `clientNum`, `weapon`, origine finie, HP plausible…). Deux candidats distants d'exactement `sizeof(snapshot_t) = 53 772` octets sont presque sûrement `cg.activeSnapshots[0]` et `[1]` ; on retient celui dont `serverTime` est le plus grand (le snapshot actif). Une fois trouvé, il est lu en un seul `ReadProcessMemory`.
-
-**Le piège `tr_base`.** Pour une entité joueur, la position fiable est `pos.trBase`, pas `origin` (laissé à zéro pour les entités interpolées).
-
-**Pourquoi `aim-mouse` existe.** Les écritures mémoire de `aimbot` retombaient sur des copies (historique de snapshots) qui n'alimentent pas le rendu. Plutôt que de chercher la bonne adresse, `aim-mouse` suit le chemin d'entrée du jeu (`CL_MouseEvent` → `cl.viewangles` → rendu). Les corrections sont intégrées localement et resynchronisées à chaque nouveau snapshot, car le serveur n'en envoie que ~20-40 par seconde.
-
-**Pourquoi l'ESP est limité (PVS).** Le serveur ne transmet à un client que les entités de son PVS (Potentially Visible Set). Ce que lit `esp` est donc exactement ce que le client reçoit : c'est une limite du protocole, pas du code. Pour voir toutes les entités il faut lire l'état autoritatif du serveur (`g_entities[]`), accessible seulement si **tu héberges** la partie. Ce volet est planifié (voir `docs/server-reverse.md` et la commande `server-entities`).
-
-**Validation de layout.** Chaque miroir porte des `const _: () = assert!(...)` sur la taille et des offsets clés (ex. `EntityState` = 208, `PlayerState` = 468, `Snapshot` = 53 772). Ces assertions vérifient la cohérence de **ton miroir Rust** avec les valeurs de référence ; la validation face au binaire réellement exécuté repose sur le filtre de plausibilité à l'exécution.
+- Windows x86_64 only; ioquake3 with the cgame VM (QVM).
+- Several engine RVAs are hard-coded in `aimbot.rs` and tied to one ioquake3 build; they are not yet listed in `offsets.json`.
+- `aimbot` (memory write) is partly ineffective because some target addresses are copies; `aim-mouse` is the reliable path.
+- `server-entities` assumptions still to be confirmed in-game: the `svFlags` offset, the default scan window, and the tail layout of `server_t` (see `docs/server-reverse.md`).
+- The client can only see entities inside its PVS; entities outside it are visible only through the server array.
+- No configuration file, interactive UI, or structured logging yet.
 
 ---
 
-## Limites et points connus
+## Documentation
 
-- **Windows x86_64 uniquement**, ioquake3 avec `cgame.qvm` (interpréteur), pas de DLL cgame.
-- **RVA propres à un build.** Les valeurs de `aimbot.rs` (`0x7B409C`, `0x7B4098`, `0x7B9988`, stride `0x21C`) sont des constantes en dur observées empiriquement ; elles ne sont pas dans une couche de configuration et changeront avec un autre build.
-- **`aimbot` mémoire : fiabilité partielle**, d'où `aim-mouse`. Ciblage simple (le plus proche, sans filtre d'équipe, sans test de vivant dans `aimbot`).
-- Pas de verrou technique « partie locale » sur `aimbot`, `aim-mouse`, `esp` (choix assumé, voir [Usage responsable](#usage-responsable)).
-- Tests : le SDK est testé (filtres, stride, règle bots) mais pas les commandes `cli` ; pas encore de fixture de snapshot réel.
-- `server-entities` : hypothèses à confirmer en jeu (offset `svFlags`, fenêtre de scan, fin de `server_t`) ; voir `docs/server-reverse.md` §6.
-- `offsets.json` contient encore des références à d'anciens binaires (`memory --bin dump-snapshot`).
+All files below are in French.
 
----
-
-## Usage responsable
-
-**Objectif du projet.** Comprendre de l'intérieur comment fonctionne un cheat client (lecture mémoire, scan par signature, visée assistée, overlay) et ce que la conception réseau du jeu permet ou empêche (PVS). Pour que la démonstration soit honnête, les modules fonctionnent réellement ; ils ne sont pas des maquettes.
-
-**Politique d'usage de l'auteur.**
-- Utilisation uniquement sur une partie hébergée par l'auteur, contre des bots.
-- Le code reste privé : pas de binaire précompilé, pas de publication d'une version « prête à l'emploi ».
-- Jamais utilisé en ligne ni contre de vrais joueurs.
-- Pas de contournement d'anti-cheat, pas de masquage du processus, pas de manipulation du réseau. Ces points sont hors périmètre.
-
-**Position éthique.** ioquake3 est libre et gratuit, mais cela ne change rien au fait que tricher contre des joueurs réels va à l'encontre des règles des serveurs et de l'esprit du jeu : c'est une pratique non éthique. Le projet l'étudie pour la comprendre, pas pour la promouvoir. Aucune affirmation n'est faite ici sur la légalité d'un tel usage, qui dépend des règles de chaque serveur et du droit applicable.
-
-**État technique.** Il n'existe pas de verrou technique général : `aimbot`, `aim-mouse` et `esp` fonctionnent sur n'importe quelle session ioquake3. Seul `server-entities` contient un contrôle de cohérence (arrêt s'il voit plusieurs joueurs non-bots). Le respect de la politique ci-dessus repose donc sur l'auteur, ce qui est assumé et documenté.
-
-## Roadmap
-
-1. Valider `server-entities` en jeu, puis exploiter les données serveur (liste complète des joueurs, vie, équipe) dans l'ESP et le choix de cible.
-2. ~~Factoriser la localisation du snapshot~~ (fait : `cli/src/locate.rs`, filtres dans `sdk`). Reste : déplacer les RVA de `aimbot.rs` dans `offsets.json`/config.
-3. Tests sur fixtures (snapshot binaire capturé, rejoué hors jeu) pour le SDK.
-4. `qcheat.toml`, `qcheat doctor`, logging `tracing`, puis TUI.
-5. Volet serveur : étudier `sv_snapshot.c` en détail et compléter `docs/server-reverse.md`.
+| File | Content |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | Structure, data flow, how to add a command, study path |
+| [`docs/reverse-engineering.md`](docs/reverse-engineering.md) | Client-side walkthrough: from the first HP value to the full snapshot |
+| [`docs/server-reverse.md`](docs/server-reverse.md) | Server-side study: `g_entities[]`, PVS, method and open points |
+| [`docs/cahier-des-charges.md`](docs/cahier-des-charges.md) | Project specification, phases, status |
+| [`docs/comprendre-le-projet.md`](docs/comprendre-le-projet.md) | Concepts, glossary, typical questions |
 
 ---
 
-## Références
+## License
 
-- ioquake3 : `code/qcommon/q_shared.h`, `code/cgame/cg_public.h`, `code/client/client.h`, `code/server/sv_snapshot.c`
-- `windows-rs` (ReadProcessMemory, WriteProcessMemory, Toolhelp32, SendInput, GDI)
-- `bytemuck`
-- Documentation du projet : `docs/cahier-des-charges.md`, `docs/reverse-engineering.md`, `docs/comprendre-le-projet.md`
-
-## Licence
-
-Code du projet : MIT. Les noms de champs, tailles et offsets de structures proviennent des headers ioquake3 (GPL-2.0), qui reste la propriété de ses auteurs ; aucun code ioquake3 n'est inclus.
+MIT for the project code. Structure names, sizes, and offsets come from the public ioquake3 headers (GPL-2.0); no ioquake3 code is included.
