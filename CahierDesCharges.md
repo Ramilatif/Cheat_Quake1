@@ -1,6 +1,6 @@
 # Cahier des charges — Cheat_Quake1
 
-**Étude de la lecture et de la modification de l'état d'un processus tiers en Rust externe : reverse-engineering, miroir de structures C, scan mémoire par signature, interaction avec le jeu et étude du protocole client-serveur, sur un jeu open-source (ioquake3), en local.**
+**Étude de la lecture et de la modification de l'état d'un processus tiers en Rust externe : reverse-engineering, miroir de structures C, scan mémoire par signature, interaction avec le jeu et étude du protocole client-serveur, sur un jeu open-source (ioquake3). Preuve de concept fonctionnelle en conditions réelles, utilisée en local.**
 
 *Version révisée pour refléter l'état réel du dépôt.*
 
@@ -60,7 +60,7 @@ Ces modules ont été développés au-delà du plan initial (qui ne prévoyait n
 
 ### 3.3 Fonctionnalités planifiées
 
-- **Garde-fou « partie locale » étendu** (priorité 1) : déjà en place dans `server-entities` (refus si plus d'un joueur non-bot) ; à brancher sur `aimbot`, `aim-mouse` et `esp`.
+- **Exploitation des données serveur** : liste complète des joueurs, vie, équipe, intégrées à l'ESP et au choix de cible.
 - **Aimbot v2** : sélection de cible configurable (angle minimal, HP le plus faible), filtre d'équipe et de vivant, filtre de portée. *Les aspects de « discrétion » de l'ancienne version sont abandonnés : le projet étudie le contrôle et le protocole, pas l'évitement de détection.*
 - **UX** : `qcheat.toml`, `qcheat doctor`, mode TUI, logging structuré (`tracing`).
 - **Tests sur fixtures** : snapshot binaire capturé, rejoué hors-ligne pour tester le SDK et les parseurs en CI.
@@ -126,7 +126,7 @@ Workspace Cargo, quatre crates. Le graphe réel des dépendances est :
 | 6 | Localisation de la variable d'angle de rendu (`find-viewangles`, RVA relevés) | Partiel — localisation de `cl` non retrouvée dans le code |
 | 7 | Aimbot v1 (`aimbot` mémoire, `aim-mouse` entrée) | Fonctionnel côté `aim-mouse`, expérimental côté `aimbot` |
 | 7bis | ESP overlay | Livré, limité par le PVS |
-| 8 | Factorisation du locator (fait) ; garde-fou « partie locale » (fait pour `server-entities`, à étendre) ; RVA en configuration (à faire) | En cours |
+| 8 | Factorisation du locator (fait) ; RVA en configuration (à faire) | En cours |
 | 9 | Aimbot v2 (sélection configurable, filtres) | Planifié |
 | 10 | UX (`qcheat.toml`, `doctor`, TUI, `tracing`) | Planifié |
 | 11 | Tests sur fixtures | Planifié |
@@ -135,17 +135,22 @@ Workspace Cargo, quatre crates. Le graphe réel des dépendances est :
 
 Principe : chaque phase laisse le projet compilable et fonctionnel.
 
-## 8. Cadre éthique et légal
+## 8. Cadre éthique et politique d'usage
 
+**Finalité.** Le projet vise à démontrer, de manière fonctionnelle et non simulée, qu'un cheat réel (lecture mémoire, visée assistée, overlay, étude du PVS) se construit avec des outils simples sur une cible sans protection. Cette démonstration est le sujet d'étude ; elle n'a pas vocation à être déployée.
+
+**Politique d'usage de l'auteur.**
 - Cible open-source GPL-2.0 ; aucun contournement de DRM ni de protection logicielle.
-- **Exécution locale uniquement** : parties hébergées sur la même machine, contre des bots ; aucune connexion à un serveur public.
-- Aucun code de la cible n'est redistribué ; aucun binaire précompilé n'est diffusé.
-- Pas de contournement d'anti-cheat, pas de masquage de processus, pas de manipulation de paquets réseau.
-- Le projet ne cherche pas à être utilisé contre des joueurs réels.
+- Utilisation sur une partie hébergée par l'auteur, contre des bots, sur sa machine.
+- Code non distribué : pas de binaire précompilé, pas de version « prête à l'emploi ».
+- Jamais utilisé en ligne ni contre de vrais joueurs.
+- Hors périmètre : contournement d'anti-cheat, masquage de processus, manipulation de paquets réseau.
 
-**État honnête du respect de ces engagements :** seule la commande `server-entities` vérifie que la partie ne contient pas d'autres humains ; `aimbot`, `aim-mouse` et `esp` ne vérifient rien, et leur périmètre repose sur l'utilisateur. La phase 8 (garde-fou technique) vise à rendre cet engagement vérifiable : les commandes qui écrivent en mémoire, injectent des entrées ou dessinent l'overlay doivent refuser de s'exécuter hors partie hébergée localement. Tant qu'elle n'est pas faite, la formulation correcte est « conçu pour un usage local » et non « impossible à utiliser autrement ».
+**Position éthique.** Que la cible soit libre et gratuite ne rend pas acceptable la triche contre des joueurs réels : elle contrevient aux règles des serveurs et à l'esprit du jeu. Le document ne se prononce pas sur la légalité d'un tel usage, qui dépend des règles de chaque serveur et du droit applicable ; il se limite à affirmer que l'auteur s'interdit cet usage.
 
-Le volet serveur est présenté comme une étude de protocole : le wallhack serveur n'est possible que lorsque l'utilisateur est l'hôte, c'est-à-dire déjà autorité sur la simulation. C'est précisément ce que le projet démontre.
+**État technique.** Il n'existe pas de verrou technique général : `aimbot`, `aim-mouse` et `esp` fonctionnent sur toute session ioquake3. Seule `server-entities` embarque un contrôle de cohérence (arrêt si plusieurs joueurs non-bots sont détectés). Le respect de la politique repose sur l'auteur ; ce choix est assumé et documenté.
+
+Le volet serveur reste une étude de protocole : le wallhack serveur ne fonctionne que lorsque l'utilisateur est l'hôte, c'est-à-dire déjà autorité sur la simulation. C'est précisément ce que le projet démontre.
 
 ## 9. Limites assumées
 
@@ -166,6 +171,6 @@ Le volet serveur est présenté comme une étude de protocole : le wallhack serv
 
 ## 11. Suite envisagée
 
-**Court terme** : factorisation du locator de snapshot ; RVA dans la configuration ; correction de la documentation.
+**Court terme** : validation en jeu de `server-entities` ; RVA dans la configuration ; correction de la documentation.
 **Moyen terme** : tests sur fixtures ; `qcheat.toml`, `doctor`, `tracing` ; aimbot v2 (sélection, filtres d'équipe/vivant) ; TUI.
 **Long terme** : étude de `sv_snapshot.c` ; localisation de `g_entities[]` en listen server ; démonstration locale ; rédaction de `docs/server-reverse.md`.
