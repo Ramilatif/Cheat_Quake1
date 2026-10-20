@@ -155,8 +155,7 @@ ioquake3 that means reading `g_entities[MAX_GENTITIES]` from
 
 ## Layout validation
 
-Every mirror in `crates/sdk` has compile-time `assert!`s on size and
-key field offsets:
+The mirrors in 'crates/sdk' use compile-time assert!s to check structure sizes and selected field offsets:
 
 ```rust
 const _: () = assert!(core::mem::size_of::<EntityState>() == 208);
@@ -176,11 +175,25 @@ was built, the dead ends along the way, and why client-side ESP in
 Quake III is PVS-bounded by construction — lives in
 [docs/reverse-engineering.md](docs/reverse-engineering.md).
 
+## Limitations
+
+- Platform: Windows x86_64 only.
+- Target configuration: The current implementation targets ioquake3 with cgame.qvm; native DLL-based client-game configurations are not covered by the current assumptions.
+- Build-specific offsets: Hard-coded RVAs and memory layouts may change with a different executable or engine build.
+- Experimental aimbot: Memory writes may target historical copies rather than the values used for rendering. The targeting logic is basic and has limited player-state filtering.
+- Duplicated snapshot logic: Snapshot discovery is repeated across commands and should eventually be moved into a shared module.
+- Limited tests: The scanner has targeted tests, but the SDK structures and live-process functionality need more extensive validation.
+- Configuration: Build-specific offsets and command settings are not yet managed through a unified configuration system.
+- Local-session enforcement: No technical guard currently ensures that experimental interaction features run only in a locally hosted session.
+
+
 ## References
 
 - [ioquake3 source](https://github.com/ioquake/ioq3) — `code/qcommon/q_shared.h`, `code/cgame/cg_public.h`, `code/client/client.h`
 - [windows-rs](https://github.com/microsoft/windows-rs) — `ReadProcessMemory`, `Toolhelp32` bindings
 - [bytemuck](https://github.com/Lokathor/bytemuck) — safe `Pod` casting
+
+Some documentation files may describe work in progress or planned features and may not yet exist in the repository.
 
 ## License
 
