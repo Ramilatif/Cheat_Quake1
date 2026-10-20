@@ -20,7 +20,7 @@ The project is a hands-on study of memory reverse-engineering: mirroring C struc
 8. [Testing](#testing)
 9. [Known limitations](#known-limitations)
 10. [Documentation](#documentation)
-11. [References](#reference)
+11. [References](#references)
 12. [License](#license)
 
 ---
