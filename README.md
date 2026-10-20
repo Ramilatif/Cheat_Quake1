@@ -101,6 +101,10 @@ cargo run -p cli -- snapshot
 cargo run -p cli -- inspect 0x0613F728 --mode raw
 cargo run -p cli -- scan 0x06800000 0x80000
 
+# Experimental interaction features — local sessions only:
+cargo run -p cli -- aim-mouse --toggle-key 0x2D
+cargo run -p cli -- esp --fov 90
+
 # Or directly with the built binary:
 .\target\release\qcheat.exe snapshot
 .\target\release\qcheat.exe --help
@@ -109,6 +113,8 @@ cargo run -p cli -- scan 0x06800000 0x80000
 Note: `qcheat` is a console application. Launching it by double-click
 from Explorer just flashes a window with the auto-generated help and
 exits — always run it from PowerShell / cmd.
+
+Absolute memory addresses can change between launches. Use the command's current --help output to check available options.
 
 ## How the snapshot reader works
 
@@ -130,6 +136,8 @@ Once located, the subcommand reads the 53 KiB struct in one
 `entities[0..numEntities]`. For `ET_PLAYER` entities, the canonical
 position is `pos.trBase` (not `origin`, which the engine leaves zero for
 interpolated entities).
+
+This detection method relies on the expected memory layout and runtime sanity checks. It is a heuristic for the targeted build, not a guarantee that every compatible binary will use the same layout.
 
 ## Why client-side ESP is naturally limited
 
