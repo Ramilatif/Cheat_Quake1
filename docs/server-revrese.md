@@ -49,12 +49,4 @@ Pour chaque joueur du serveur : numéro de slot, type (hôte/bot), vivant/mort, 
 - Que le snapshot contienne bien l'entité du joueur local (sinon il faut ≥ 2 bots visibles, ou `--stride`).
 - Alignement : le scanner générique (`scan_aligned`) lit via `from_bytes` sur un `Vec<u8>` ; correct en pratique mais non garanti par le type.
 
-## 7. Questions de jury associées
 
-**Pourquoi le serveur est-il lisible alors que le client ne l'est pas ?** Parce qu'en listen server les deux tournent dans le même processus ; contre un serveur distant, `g_entities` n'existe pas dans ta mémoire.
-
-**Comment sais-tu que ce bloc est bien `g_entities` et pas une copie ?** Les copies client ne passent pas le test de cohérence du bloc `r` ; le stride déduit est recoupé avec l'entier `gentitySize` du moteur.
-
-**Pourquoi un stride inconnu ?** Le moteur n'impose que la tête de `gentity_t` ; le reste appartient au mod et sa taille est donnée à l'exécution.
-
-**Quelle leçon de conception réseau ?** Ce que le serveur n'envoie pas ne peut pas fuiter ; la sécurité vient de l'omission côté serveur, pas d'une vérification côté client.
