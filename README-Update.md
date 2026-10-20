@@ -1,10 +1,10 @@
 # Cheat_Quake1 (`qcheat`)
 
-Boîte à outils Rust **externe** (hors processus) pour étudier l'état d'un client **ioquake3** en cours d'exécution sous Windows x86_64 : position, HP, angles de vue et liste complète des entités de la frame courante. Projet d'apprentissage autour du reverse-engineering, du scan mémoire et de la correspondance octet par octet entre structures C et structures Rust.
+Boîte à outils Rust **externe** (hors processus) pour étudier un client **ioquake3** en cours d'exécution sous Windows x86_64 : position, HP, angles de vue, liste des entités, et, au-delà de la lecture, visée assistée et overlay. C'est une **preuve de concept fonctionnelle en conditions réelles** : elle montre qu'avec des outils simples et une cible sans protection, un vrai cheat se construit. Projet d'apprentissage autour du reverse-engineering, du scan mémoire et de la correspondance octet par octet entre structures C et structures Rust.
 
 ioquake3 est sous licence GPL-2.0. Ce dépôt ne redistribue aucun de ses codes.
 
-> **Périmètre.** Recherche pédagogique sur une partie **locale** (`/devmap` + `/addbot`), contre des **bots**, sur la même machine. Le projet n'est pas conçu pour des serveurs en ligne et ne doit pas y être utilisé. Voir [Usage responsable](#usage-responsable).
+> **Périmètre.** Recherche pédagogique, utilisée par l'auteur uniquement sur une partie **locale** (`/devmap` + `/addbot`), contre des **bots**, sur sa propre machine. Le code n'est pas distribué et n'est pas destiné à un usage en ligne. Voir [Usage responsable](#usage-responsable).
 
 ---
 
@@ -23,10 +23,10 @@ Le binaire unique `qcheat` expose 12 sous-commandes. Elles se répartissent en t
 | `scan <center> [--range]` | Scanne une fenêtre pour des motifs `entityState_t` et détecte les arrays par stride. |
 | `players` | Scan du heap filtré sur les entités `ET_PLAYER`. |
 | `snapshot` | Localise `cg.activeSnapshots[2]` (signature : deux candidats espacés de 53 772 octets), puis affiche le joueur local et toutes les entités visibles. |
-| `server-entities` | **Listen server uniquement.** Retrouve `g_entities[]` (état autoritatif du serveur) en prenant les joueurs du snapshot client comme référence, déduit `sizeof(gentity_t)`, recoupe avec `sv.gentities` du moteur, puis liste les joueurs du serveur et marque ceux que le client n'a **pas** reçus (filtrés par le PVS). Refuse de tourner si plus d'un joueur n'est pas un bot. |
+| `server-entities` | **Listen server uniquement.** Retrouve `g_entities[]` (état autoritatif du serveur) en prenant les joueurs du snapshot client comme référence, déduit `sizeof(gentity_t)`, recoupe avec `sv.gentities` du moteur, puis liste les joueurs du serveur et marque ceux que le client n'a **pas** reçus (filtrés par le PVS). Contient un contrôle de cohérence qui s'arrête s'il détecte plusieurs joueurs non-bots. |
 | `find-viewangles` | Retrouve par élimination (valeur connue + rondes de confirmation pendant que tu bouges la souris) l'adresse du yaw de rendu. |
 
-### Interaction avec le jeu 
+### Interaction avec le jeu (expérimental, à n'utiliser qu'en local)
 
 | Commande | Rôle | Remarque |
 |---|---|---|
@@ -110,7 +110,7 @@ Valeurs par défaut utiles : fenêtre de scan `0x07000000 ± 0x02000000` ; `aim-
 - **Windows x86_64 uniquement**, ioquake3 avec `cgame.qvm` (interpréteur), pas de DLL cgame.
 - **RVA propres à un build.** Les valeurs de `aimbot.rs` (`0x7B409C`, `0x7B4098`, `0x7B9988`, stride `0x21C`) sont des constantes en dur observées empiriquement ; elles ne sont pas dans une couche de configuration et changeront avec un autre build.
 - **`aimbot` mémoire : fiabilité partielle**, d'où `aim-mouse`. Ciblage simple (le plus proche, sans filtre d'équipe, sans test de vivant dans `aimbot`).
-- **Garde-fou « partie locale » seulement sur `server-entities`** (`aimbot`, `aim-mouse` et `esp` n'en ont pas encore).
+- Pas de verrou technique « partie locale » sur `aimbot`, `aim-mouse`, `esp` (choix assumé, voir [Usage responsable](#usage-responsable)).
 - Tests : le SDK est testé (filtres, stride, règle bots) mais pas les commandes `cli` ; pas encore de fixture de snapshot réel.
 - `server-entities` : hypothèses à confirmer en jeu (offset `svFlags`, fenêtre de scan, fin de `server_t`) ; voir `docs/server-reverse.md` §6.
 - `offsets.json` contient encore des références à d'anciens binaires (`memory --bin dump-snapshot`).
@@ -119,21 +119,25 @@ Valeurs par défaut utiles : fenêtre de scan `0x07000000 ± 0x02000000` ; `aim-
 
 ## Usage responsable
 
-- À exécuter **uniquement** sur ta machine, dans une partie que tu héberges, contre des bots.
-- Ne pas utiliser contre des joueurs réels ni sur des serveurs publics ; ce serait contraire aux règles de ces serveurs et à l'esprit du projet.
-- Pas de contournement d'anti-cheat, pas de masquage du processus, pas de diffusion d'un binaire précompilé.
-- **Fait pour `server-entities`** : la commande refuse d'afficher quoi que ce soit si plus d'un joueur n'est pas un bot.
-- **Engagement de développement (priorité 1) :** étendre une vérification technique qui refuse les commandes d'écriture mémoire, d'injection d'entrée et d'overlay quand la session n'est pas une partie hébergée localement. Tant que ce garde-fou n'existe pas, le respect de ce périmètre repose sur l'utilisateur.
+**Objectif du projet.** Comprendre de l'intérieur comment fonctionne un cheat client (lecture mémoire, scan par signature, visée assistée, overlay) et ce que la conception réseau du jeu permet ou empêche (PVS). Pour que la démonstration soit honnête, les modules fonctionnent réellement ; ils ne sont pas des maquettes.
 
----
+**Politique d'usage de l'auteur.**
+- Utilisation uniquement sur une partie hébergée par l'auteur, contre des bots.
+- Le code reste privé : pas de binaire précompilé, pas de publication d'une version « prête à l'emploi ».
+- Jamais utilisé en ligne ni contre de vrais joueurs.
+- Pas de contournement d'anti-cheat, pas de masquage du processus, pas de manipulation du réseau. Ces points sont hors périmètre.
+
+**Position éthique.** ioquake3 est libre et gratuit, mais cela ne change rien au fait que tricher contre des joueurs réels va à l'encontre des règles des serveurs et de l'esprit du jeu : c'est une pratique non éthique. Le projet l'étudie pour la comprendre, pas pour la promouvoir. Aucune affirmation n'est faite ici sur la légalité d'un tel usage, qui dépend des règles de chaque serveur et du droit applicable.
+
+**État technique.** Il n'existe pas de verrou technique général : `aimbot`, `aim-mouse` et `esp` fonctionnent sur n'importe quelle session ioquake3. Seul `server-entities` contient un contrôle de cohérence (arrêt s'il voit plusieurs joueurs non-bots). Le respect de la politique ci-dessus repose donc sur l'auteur, ce qui est assumé et documenté.
 
 ## Roadmap
 
-1. Garde-fou « partie locale » (partagé par `aimbot`, `aim-mouse`, `esp`).
+1. Valider `server-entities` en jeu, puis exploiter les données serveur (liste complète des joueurs, vie, équipe) dans l'ESP et le choix de cible.
 2. ~~Factoriser la localisation du snapshot~~ (fait : `cli/src/locate.rs`, filtres dans `sdk`). Reste : déplacer les RVA de `aimbot.rs` dans `offsets.json`/config.
 3. Tests sur fixtures (snapshot binaire capturé, rejoué hors jeu) pour le SDK.
 4. `qcheat.toml`, `qcheat doctor`, logging `tracing`, puis TUI.
-5. Volet serveur : valider `server-entities` en jeu, étudier `sv_snapshot.c` en détail, compléter `docs/server-reverse.md`.
+5. Volet serveur : étudier `sv_snapshot.c` en détail et compléter `docs/server-reverse.md`.
 
 ---
 
