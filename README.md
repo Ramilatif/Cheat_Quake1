@@ -84,7 +84,7 @@ Build (debug + release):
 
 ```powershell
 cargo build --workspace            # target/debug/qcheat.exe
-cargo build --release              # target/release/qcheat.exe — distributable
+cargo build --release              # target/release/qcheat.exe — release build
 ```
 
 Run the unit tests (currently `scanner::stride`):
