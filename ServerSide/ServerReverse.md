@@ -37,11 +37,9 @@ Pourquoi ça marche : c'est la même idée que pour le snapshot (signature struc
 
 Pour chaque joueur du serveur : numéro de slot, type (hôte/bot), vivant/mort, position serveur, et surtout **s'il figure dans le snapshot du client**. Les joueurs absents du snapshot sont ceux que le serveur a filtrés (PVS) : c'est la démonstration directe de la limite du wallhack côté client.
 
-## 5. Règle de sécurité intégrée
+## 5. Contrôle de cohérence intégré
 
-`server-entities` refuse d'afficher quoi que ce soit si plus d'un joueur **n'est pas** marqué `SVF_BOT` (`sdk::bots_only_verdict`). Le contrôle échoue côté sûr : si l'offset de `svFlags` était faux, les bots ne porteraient pas le drapeau, plusieurs « humains » apparaîtraient et la commande refuserait. Limite connue : un humain spectateur n'est pas lié au monde et n'est pas compté.
-
-Cette règle protège la nouvelle commande. Elle n'est **pas encore** branchée sur `aimbot`, `aim-mouse` et `esp` (voir feuille de route).
+`server-entities` s'arrête s'il détecte plus d'un joueur **non** marqué `SVF_BOT` (`sdk::bots_only_verdict`). Ce n'est pas un verrou de sécurité général du projet, mais un test de cohérence : si l'offset de `svFlags` était faux, les bots ne porteraient pas le drapeau et la commande s'arrêterait, ce qui sert aussi de validation indirecte de l'offset. Limite connue : un humain spectateur n'est pas lié au monde et n'est pas compté. Les autres commandes n'ont pas ce contrôle.
 
 ## 6. À valider en jeu (hypothèses non confirmées)
 
