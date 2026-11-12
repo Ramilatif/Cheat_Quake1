@@ -1,4 +1,4 @@
-# Cahier des charges — Cheat_Quake1
+# Cahier des charges - Cheat_Quake1
 
 **Étude de la lecture et de la modification de l'état d'un processus tiers en Rust externe : reverse-engineering, miroir de structures C, scan mémoire par signature, interaction avec le jeu et étude du protocole client-serveur, sur un jeu open-source (ioquake3). Preuve de concept fonctionnelle en conditions réelles, utilisée en local.**
 
