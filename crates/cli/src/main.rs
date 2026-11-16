@@ -7,6 +7,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 
 mod cmd;
+mod locate;
 mod util;
 
 /// External-process reader for ioquake3 on Windows.
@@ -41,6 +42,8 @@ enum Cmd {
     Players(cmd::players::Args),
     /// Locate cg.activeSnapshots and dump the active frame.
     Snapshot(cmd::snapshot::Args),
+    /// Read the server's g_entities[] (listen server) and compare with the client snapshot.
+    ServerEntities(cmd::server_entities::Args),
 }
 
 fn main() -> Result<()> {
@@ -56,5 +59,6 @@ fn main() -> Result<()> {
         Cmd::Scan(a) => cmd::scan::run(a),
         Cmd::Players(a) => cmd::players::run(a),
         Cmd::Snapshot(a) => cmd::snapshot::run(a),
+        Cmd::ServerEntities(a) => cmd::server_entities::run(a),
     }
 }

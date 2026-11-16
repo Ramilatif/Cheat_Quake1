@@ -2,19 +2,16 @@
 //! frame (local player + every visible entity).
 
 use anyhow::{Context, Result};
-use bytemuck::{Pod, Zeroable};
 use clap::Args as ClapArgs;
 use sdk::{
-    EntityState, EntityType, PlayerState, Snapshot, SnapshotHeader, MAX_CLIENTS,
+    EntityState, EntityType, PlayerState, Snapshot, SnapshotHeader,
     MAX_ENTITIES_IN_SNAPSHOT, STAT_ARMOR, STAT_HEALTH,
 };
 
+use crate::locate::find_snapshot_candidates;
+use sdk::SnapshotFilter;
 use crate::util::{parse_hex, DEFAULT_PROCESS};
 
-/// Bytes per chunked read while scanning.
-const CHUNK: usize = 4096;
-/// Size of the snapshot fingerprint we evaluate at each offset.
-const HEADER_SIZE: usize = core::mem::size_of::<SnapshotHeader>();
 
 /// Default heap scan window. The 32 MiB band around `0x07000000`
 /// covers the addresses where the cgame QVM allocates `cg` in our
@@ -57,7 +54,7 @@ pub fn run(args: Args) -> Result<()> {
         (end - start) / 1024
     );
 
-    let hits = find_snapshot_candidates(&handle, start, end);
+    let hits = find_snapshot_candidates(&handle, start, end, SnapshotFilter::Strict);
     if hits.is_empty() {
         println!("No snapshot_t candidates found.");
         println!("Tip: widen the range or shift the center via --center / --range.");
@@ -119,94 +116,6 @@ pub fn run(args: Args) -> Result<()> {
     print_local_player(&snap.header.ps);
     print_entities(&snap.entities, snap.header.num_entities);
     Ok(())
-}
-
-/// Walk the requested window and report addresses that look like a
-/// real `snapshot_t`.
-fn find_snapshot_candidates(
-    handle: &process::ProcessHandle,
-    start: usize,
-    end: usize,
-) -> Vec<usize> {
-    let mut hits = Vec::new();
-    let mut cursor = start;
-    while cursor < end {
-        let buf = match handle.read::<Chunk>(cursor) {
-            Ok(b) => b,
-            Err(_) => {
-                cursor = cursor.saturating_add(CHUNK);
-                continue;
-            }
-        };
-        let mut off = 0usize;
-        while off + HEADER_SIZE <= buf.0.len() {
-            let header: &SnapshotHeader =
-                bytemuck::from_bytes(&buf.0[off..off + HEADER_SIZE]);
-            if looks_like_snapshot(header) {
-                hits.push(cursor + off);
-                // Skip past this snapshot — there can't be another one
-                // overlapping it, and we don't want 50 dupes from shifted reads.
-                off += HEADER_SIZE;
-            } else {
-                off += 4;
-            }
-        }
-        cursor = cursor.saturating_add(CHUNK);
-    }
-    hits
-}
-
-/// Sanity-filter a candidate `SnapshotHeader`. Strict enough that an
-/// all-zero block doesn't pass, loose enough that any real in-game
-/// frame does.
-fn looks_like_snapshot(h: &SnapshotHeader) -> bool {
-    if !(0..=MAX_ENTITIES_IN_SNAPSHOT as i32).contains(&h.num_entities) {
-        return false;
-    }
-    if h.server_time < 1_000 {
-        return false;
-    }
-    if !(0..=2_000).contains(&h.ping) {
-        return false;
-    }
-    let ps = &h.ps;
-    if !(0..MAX_CLIENTS as i32).contains(&ps.client_num) {
-        return false;
-    }
-    if !(0..=15).contains(&ps.weapon) {
-        return false;
-    }
-    if !(0..=8).contains(&ps.pm_type) {
-        return false;
-    }
-    let o = ps.origin;
-    if !o.x.is_finite() || !o.y.is_finite() || !o.z.is_finite() {
-        return false;
-    }
-    if o.x.abs() >= 32_768.0 || o.y.abs() >= 32_768.0 || o.z.abs() >= 32_768.0 {
-        return false;
-    }
-    let hp = ps.stats[STAT_HEALTH];
-    if !(-50..=1_000).contains(&hp) {
-        return false;
-    }
-
-    let origin_zero = o.x == 0.0 && o.y == 0.0 && o.z == 0.0;
-    let velocity_zero =
-        ps.velocity.x == 0.0 && ps.velocity.y == 0.0 && ps.velocity.z == 0.0;
-    let angles_zero =
-        ps.viewangles.x == 0.0 && ps.viewangles.y == 0.0 && ps.viewangles.z == 0.0;
-    if origin_zero && velocity_zero && angles_zero && hp <= 0 {
-        return false;
-    }
-    const PM_NORMAL: i32 = 0;
-    if ps.pm_type == PM_NORMAL && (hp <= 0 || origin_zero) {
-        return false;
-    }
-    if ps.command_time <= 0 {
-        return false;
-    }
-    true
 }
 
 /// Print the local player block.
@@ -278,12 +187,3 @@ fn print_entities(entities: &[EntityState; MAX_ENTITIES_IN_SNAPSHOT], num: i32) 
         );
     }
 }
-
-/// Fixed-size byte buffer for chunked reads.
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct Chunk([u8; CHUNK + HEADER_SIZE]);
-
-// SAFETY: a byte array is trivially Pod/Zeroable.
-unsafe impl Zeroable for Chunk {}
-unsafe impl Pod for Chunk {}

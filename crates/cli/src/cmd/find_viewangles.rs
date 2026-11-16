@@ -17,10 +17,10 @@ use scanner::scan_aligned;
 use std::thread;
 use std::time::Duration;
 
+use crate::locate::find_snapshot_candidates;
+use sdk::SnapshotFilter;
 use crate::util::{parse_hex, DEFAULT_PROCESS};
 
-const CHUNK: usize = 4096;
-const HEADER_SIZE: usize = core::mem::size_of::<sdk::SnapshotHeader>();
 const SNAP_DEFAULT_CENTER: usize = 0x07000000;
 const SNAP_DEFAULT_RANGE: usize = 0x02000000;
 const SNAPSHOT_STRIDE: usize = 0x21C;
@@ -190,7 +190,7 @@ fn read_reference_angles(handle: &process::ProcessHandle) -> Result<(usize, f32,
     let start = SNAP_DEFAULT_CENTER.saturating_sub(SNAP_DEFAULT_RANGE);
     let end = SNAP_DEFAULT_CENTER.saturating_add(SNAP_DEFAULT_RANGE);
 
-    let hits = find_snapshot_candidates(handle, start, end);
+    let hits = find_snapshot_candidates(handle, start, end, SnapshotFilter::Loose);
     if hits.is_empty() {
         bail!("No snapshot candidates found — is the game running and in a match?");
     }
@@ -216,79 +216,3 @@ fn read_reference_angles(handle: &process::ProcessHandle) -> Result<(usize, f32,
     let snap = handle.read::<sdk::Snapshot>(addr)?;
     Ok((addr, snap.header.ps.viewangles.y, snap.header.ps.viewangles.x))
 }
-
-fn find_snapshot_candidates(
-    handle: &process::ProcessHandle,
-    start: usize,
-    end: usize,
-) -> Vec<usize> {
-    let mut hits = Vec::new();
-    let mut cursor = start;
-
-    while cursor < end {
-        let buf = match handle.read::<Chunk>(cursor) {
-            Ok(b) => b,
-            Err(_) => {
-                cursor = cursor.saturating_add(CHUNK);
-                continue;
-            }
-        };
-
-        let mut off = 0usize;
-        while off + HEADER_SIZE <= buf.0.len() {
-            let header: &sdk::SnapshotHeader =
-                bytemuck::from_bytes(&buf.0[off..off + HEADER_SIZE]);
-            if looks_like_snapshot(header) {
-                hits.push(cursor + off);
-                off += HEADER_SIZE;
-            } else {
-                off += 4;
-            }
-        }
-        cursor = cursor.saturating_add(CHUNK);
-    }
-    hits
-}
-
-fn looks_like_snapshot(h: &sdk::SnapshotHeader) -> bool {
-    if !(1..=256).contains(&h.num_entities) {
-        return false;
-    }
-    if h.server_time < 1_000 {
-        return false;
-    }
-    if !(0..=2_000).contains(&h.ping) {
-        return false;
-    }
-    if !(0..64).contains(&h.ps.client_num) {
-        return false;
-    }
-    if !(0..=15).contains(&h.ps.weapon) {
-        return false;
-    }
-    if !(0..=8).contains(&h.ps.pm_type) {
-        return false;
-    }
-
-    let o = h.ps.origin;
-    if !o.x.is_finite() || !o.y.is_finite() || !o.z.is_finite() {
-        return false;
-    }
-    if o.x.abs() >= 32_768.0 || o.y.abs() >= 32_768.0 || o.z.abs() >= 32_768.0 {
-        return false;
-    }
-
-    let hp = h.ps.stats[0];
-    if !(-50..=1_000).contains(&hp) {
-        return false;
-    }
-
-    true
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct Chunk([u8; CHUNK + HEADER_SIZE]);
-
-unsafe impl bytemuck::Zeroable for Chunk {}
-unsafe impl bytemuck::Pod for Chunk {}

@@ -21,4 +21,5 @@ pub mod inspect;
 pub mod modules;
 pub mod players;
 pub mod scan;
+pub mod server_entities;
 pub mod snapshot;

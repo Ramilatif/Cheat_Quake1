@@ -20,10 +20,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT,
 };
 
+use crate::locate::locate_snapshot_addrs;
+use sdk::SnapshotFilter;
 use crate::util::{parse_hex, DEFAULT_PROCESS};
 
-const CHUNK: usize = 4096;
-const HEADER_SIZE: usize = core::mem::size_of::<sdk::SnapshotHeader>();
 const DEFAULT_CENTER: usize = 0x07000000;
 const DEFAULT_RANGE: usize = 0x02000000;
 /// bg_public.h: entityState_t.eFlags bit set on dead players.
@@ -131,7 +131,7 @@ pub fn run(args: Args) -> Result<()> {
     // spots directly (two cheap typed reads) to pick whichever is
     // newer by serverTime. Only fall back to a full rescan if both
     // cached addresses stop reading as valid snapshots.
-    let mut cached_addrs: Vec<usize> = locate_snapshot_addrs(&handle, start, end);
+    let mut cached_addrs: Vec<usize> = locate_snapshot_addrs(&handle, start, end, SnapshotFilter::Loose);
     if cached_addrs.is_empty() {
         println!("No snapshot found yet — will keep scanning until one appears.");
     } else {
@@ -154,7 +154,7 @@ pub fn run(args: Args) -> Result<()> {
                 .iter()
                 .any(|&a| handle.read::<sdk::SnapshotHeader>(a).is_ok())
         {
-            cached_addrs = locate_snapshot_addrs(&handle, start, end);
+            cached_addrs = locate_snapshot_addrs(&handle, start, end, SnapshotFilter::Loose);
             if cached_addrs.is_empty() {
                 thread::sleep(Duration::from_millis(args.interval_ms));
                 continue;
@@ -346,98 +346,3 @@ fn calculate_angles(from: sdk::Vec3, to: sdk::Vec3) -> (f32, f32) {
 
     (yaw, pitch)
 }
-
-/// Full scan for `cg.activeSnapshots`, returning the confirmed pair
-/// (or a single fallback candidate). Expensive — call once, then poll
-/// the returned addresses directly instead of rescanning every tick.
-fn locate_snapshot_addrs(
-    handle: &process::ProcessHandle,
-    start: usize,
-    end: usize,
-) -> Vec<usize> {
-    let hits = find_snapshot_candidates(handle, start, end);
-    if hits.is_empty() {
-        return Vec::new();
-    }
-    const SS_SIZE: usize = core::mem::size_of::<Snapshot>();
-    match hits.windows(2).find(|w| w[1] - w[0] == SS_SIZE) {
-        Some(w) => vec![w[0], w[1]],
-        None => vec![hits[0]],
-    }
-}
-
-fn find_snapshot_candidates(
-    handle: &process::ProcessHandle,
-    start: usize,
-    end: usize,
-) -> Vec<usize> {
-    let mut hits = Vec::new();
-    let mut cursor = start;
-
-    while cursor < end {
-        let buf = match handle.read::<Chunk>(cursor) {
-            Ok(b) => b,
-            Err(_) => {
-                cursor = cursor.saturating_add(CHUNK);
-                continue;
-            }
-        };
-
-        let mut off = 0usize;
-        while off + HEADER_SIZE <= buf.0.len() {
-            let header: &sdk::SnapshotHeader =
-                bytemuck::from_bytes(&buf.0[off..off + HEADER_SIZE]);
-            if looks_like_snapshot(header) {
-                hits.push(cursor + off);
-                off += HEADER_SIZE;
-            } else {
-                off += 4;
-            }
-        }
-        cursor = cursor.saturating_add(CHUNK);
-    }
-    hits
-}
-
-fn looks_like_snapshot(h: &sdk::SnapshotHeader) -> bool {
-    if !(1..=256).contains(&h.num_entities) {
-        return false;
-    }
-    if h.server_time < 1_000 {
-        return false;
-    }
-    if !(0..=2_000).contains(&h.ping) {
-        return false;
-    }
-    if !(0..64).contains(&h.ps.client_num) {
-        return false;
-    }
-    if !(0..=15).contains(&h.ps.weapon) {
-        return false;
-    }
-    if !(0..=8).contains(&h.ps.pm_type) {
-        return false;
-    }
-
-    let o = h.ps.origin;
-    if !o.x.is_finite() || !o.y.is_finite() || !o.z.is_finite() {
-        return false;
-    }
-    if o.x.abs() >= 32_768.0 || o.y.abs() >= 32_768.0 || o.z.abs() >= 32_768.0 {
-        return false;
-    }
-
-    let hp = h.ps.stats[0];
-    if !(-50..=1_000).contains(&hp) {
-        return false;
-    }
-
-    true
-}
-
-#[repr(C)]
-#[derive(Copy, Clone)]
-struct Chunk([u8; CHUNK + HEADER_SIZE]);
-
-unsafe impl bytemuck::Zeroable for Chunk {}
-unsafe impl bytemuck::Pod for Chunk {}

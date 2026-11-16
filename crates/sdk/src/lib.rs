@@ -13,19 +13,27 @@
 //! - [`entitystate`] — `entityState_t` (networked state of any world object)
 //! - [`playerstate`] — `playerState_t` (local player view)
 //! - [`snapshot`] — `snapshot_t` (one frame as cg sees it)
+//! - [`server`] — server-side `gentity_t` head (`s` + `r`) and stride inference
+//! - [`plausibility`] — shared sanity filters for scan candidates
 
 #![warn(missing_docs)]
 
 pub mod constants;
 pub mod entitystate;
+pub mod plausibility;
 pub mod playerstate;
+pub mod server;
 pub mod snapshot;
 pub mod trajectory;
 pub mod vector;
 
 pub use constants::*;
 pub use entitystate::{EntityState, EntityType};
+pub use plausibility::{looks_like_snapshot, SnapshotFilter};
 pub use playerstate::{PlayerState, STAT_ARMOR, STAT_HEALTH, STAT_MAX_HEALTH};
+pub use server::{
+    bots_only_verdict, gentities_base_checked, EntityShared, LocalOnlyVerdict, SharedEntity,
+};
 pub use snapshot::{Snapshot, SnapshotHeader};
 pub use trajectory::{TrType, Trajectory};
 pub use vector::Vec3;
