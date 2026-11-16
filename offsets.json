@@ -11,7 +11,6 @@
       "Cgame globals (cg_t cg, cg_entities[...]) live in the QVM heap — addresses are runtime-dynamic and must be located by signature scan, not hardcoded."
     ]
   },
-
   "engine_rvas": {
     "_comment": "RVAs are relative to the .exe module base. Static across runs as long as the engine binary isn't rebuilt.",
     "cl_snap_ps_stat_health": {
@@ -44,7 +43,6 @@
       "note": "These are copies from snapshots, same layout repeats 32 times with 0x21C (540) byte spacing."
     }
   },
-
   "runtime_addresses": {
     "_comment": "Heap-resident structures. Addresses change per run; recover via signature scan. Documented here for reference, not as constants.",
     "cg_activeSnapshots": {
@@ -62,7 +60,6 @@
       "note": "Lives inside cg.activeSnapshots[N].entities[] — not the engine's cl.parseEntities[] (which would be in the .exe .bss)."
     }
   },
-
   "constants": {
     "MAX_CLIENTS": 64,
     "MAX_GENTITIES": 1024,
@@ -80,18 +77,22 @@
     "ENTITYNUM_NONE": 1023,
     "STAT_HEALTH": 0,
     "STAT_ARMOR": 3,
-    "STAT_MAX_HEALTH": 6
+    "STAT_MAX_HEALTH": 6,
+    "SVF_BOT": "0x00000008",
+    "SVF_NOCLIENT": "0x00000001",
+    "SVF_BROADCAST": "0x00000020"
   },
-
   "struct_layouts": {
     "_comment": "Field offsets and sizes for x86_64. Derived from ioquake3 master and validated at compile time by assert_eq! in crates/sdk.",
-
     "vec3_t": {
       "size": 12,
       "align": 4,
-      "fields": { "x": 0, "y": 4, "z": 8 }
+      "fields": {
+        "x": 0,
+        "y": 4,
+        "z": 8
+      }
     },
-
     "trajectory_t": {
       "size": 36,
       "align": 4,
@@ -111,7 +112,6 @@
         "TR_GRAVITY": 5
       }
     },
-
     "entityState_t": {
       "size": 208,
       "align": 4,
@@ -165,7 +165,6 @@
         "The .origin field is left zeroed for interpolated entities — the client recomputes it from two consecutive snapshots."
       ]
     },
-
     "playerState_t": {
       "size": 468,
       "align": 4,
@@ -226,7 +225,6 @@
         "PM_SPINTERMISSION": 6
       }
     },
-
     "snapshot_t": {
       "size": 53772,
       "align": 4,
@@ -243,7 +241,6 @@
         "serverCommandSequence": 53768
       }
     },
-
     "clSnapshot_t": {
       "size": 540,
       "align": 4,
@@ -262,6 +259,49 @@
         "parseEntitiesNum": 532,
         "serverCommandNum": 536
       }
+    },
+    "EntityShared": {
+      "size": 308,
+      "source": "ioquake3 code/game/g_public.h (entityShared_t)",
+      "status": "layout derived from source; r.currentOrigin vs s.pos.trBase consistency and SVF_BOT on bots are checked at runtime by `qcheat server-entities`",
+      "fields": {
+        "unused (entityState_t)": 0,
+        "linked": 208,
+        "linkcount": 212,
+        "svFlags": 216,
+        "singleClient": 220,
+        "bmodel": 224,
+        "mins": 228,
+        "maxs": 240,
+        "contents": 252,
+        "absmin": 256,
+        "absmax": 268,
+        "currentOrigin": 280,
+        "currentAngles": 292,
+        "ownerNum": 304
+      }
+    },
+    "SharedEntity (gentity_t head)": {
+      "size": 516,
+      "note": "s (offset 0, 208 B) + r (offset 208, 308 B). The rest of gentity_t is private to the game module; its total size (stride of g_entities[]) is reported by the game via trap_LocateGameData and inferred at runtime. Fields up to ownerNum are 4-byte only, so the layout is identical for QVM and native 64-bit modules.",
+      "absolute_offsets": {
+        "s.number": 0,
+        "s.eType": 4,
+        "s.eFlags": 8,
+        "s.pos.trBase": 12,
+        "s.clientNum": 168,
+        "r.linked": 416,
+        "r.svFlags": 424,
+        "r.currentOrigin": 488
+      }
     }
+  },
+  "server_side": {
+    "_comment": "sv_gentities_rva is specific to the build it was measured on. Re-run `qcheat server-entities` without --sv-rva after a new ioquake3 build to refresh it.",
+    "g_entities": "runtime address, heap of qagame (dynamic, changes every launch)",
+    "sv_gentities_rva": "0x1C0DB30",
+    "gentity_stride": 804,
+    "confirmed_in_game": true,
+    "expected_server_t_tail": "gentities (8 B pointer) at the RVA above, gentitySize (i32) at +8, num_entities (i32) at +12 — confirmed by the MATCH line of `qcheat server-entities`"
   }
 }
