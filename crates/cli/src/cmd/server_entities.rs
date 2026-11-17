@@ -25,21 +25,16 @@
 use anyhow::{bail, Context, Result};
 use clap::Args as ClapArgs;
 use sdk::{
-    bots_only_verdict, gentities_base_checked, EntityState, EntityType, LocalOnlyVerdict,
-    SharedEntity, Snapshot, SnapshotFilter, MAX_CLIENTS, MAX_ENTITIES_IN_SNAPSHOT,
-    MAX_GENTITIES,
+    bots_only_verdict, EntityState, EntityType, LocalOnlyVerdict, SharedEntity, Snapshot,
+    SnapshotFilter, MAX_CLIENTS, MAX_ENTITIES_IN_SNAPSHOT, MAX_GENTITIES,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::locate::{
-    locate_snapshot_addrs, newest_snapshot_addr, DEFAULT_SNAPSHOT_CENTER, DEFAULT_SNAPSHOT_RANGE,
+    self, locate_snapshot_addrs, newest_snapshot_addr, DEFAULT_SNAPSHOT_CENTER,
+    DEFAULT_SNAPSHOT_RANGE,
 };
 use crate::util::{parse_hex, DEFAULT_PROCESS};
-
-const DEFAULT_SERVER_CENTER: usize = 0x07000000;
-const DEFAULT_SERVER_RANGE: usize = 0x04000000;
-/// Max distance between `r.currentOrigin` and `s.pos.trBase` of one entity.
-const ORIGIN_TOLERANCE: f32 = 64.0;
 
 /// Arguments accepted by `qcheat server-entities`.
 #[derive(ClapArgs)]
@@ -134,7 +129,14 @@ pub fn run(args: Args) -> Result<()> {
             (ptr as usize, size as usize, true)
         }
         None => {
-            let (b, s) = scan_for_array(&handle, &args, &client_players)?;
+            let opts = locate::GentitiesLookup {
+                center: args.center.unwrap_or(locate::DEFAULT_SERVER_CENTER),
+                range: args.range.unwrap_or(locate::DEFAULT_SERVER_RANGE),
+                tolerance: args.tolerance,
+                stride: args.stride,
+            };
+            println!("[2] Locating g_entities[]...");
+            let (b, s) = locate::locate_gentities(&handle, &client_players, &opts)?;
             (b, s, false)
         }
     };
@@ -226,99 +228,4 @@ pub fn run(args: Args) -> Result<()> {
         println!("\nTip: next time, skip the scan with --sv-rva (printed in step 2 if found).");
     }
     Ok(())
-}
-
-/// Find `g_entities[]` by matching the snapshot's players against
-/// memory, then cross-check with the engine's `sv.gentities`.
-fn scan_for_array(
-    handle: &process::ProcessHandle,
-    args: &Args,
-    client_players: &[EntityState],
-) -> Result<(usize, usize)> {
-    if client_players.is_empty() {
-        bail!("no player in the client snapshot to use as ground truth. Load a map with bots, or pass --sv-rva.");
-    }
-    if client_players.len() < 2 && args.stride.is_none() {
-        bail!("only one player visible: cannot infer sizeof(gentity_t). Pass --stride, or face a bot and retry.");
-    }
-
-    let center = args.center.unwrap_or(DEFAULT_SERVER_CENTER);
-    let range = args.range.unwrap_or(DEFAULT_SERVER_RANGE);
-    let (start, end) = (center.saturating_sub(range), center.saturating_add(range));
-    println!(
-        "[2] Scanning 0x{start:X}..0x{end:X} ({} MiB) for the server twin of {} player(s)...",
-        (end - start) / (1024 * 1024),
-        client_players.len()
-    );
-
-    let tol = args.tolerance;
-    let hits = scanner::scan_aligned::<SharedEntity, _>(handle, start, end, 4, |e| {
-        client_players
-            .iter()
-            .any(|r| sdk::server::is_server_twin(e, r, tol, ORIGIN_TOLERANCE))
-    })?;
-    // A hit exactly on a chunk boundary is seen by two consecutive reads.
-    let mut hits = hits;
-    hits.sort_by_key(|h| h.address);
-    hits.dedup_by_key(|h| h.address);
-    if hits.is_empty() {
-        bail!("no server-side twin found. Is this a listen server (/devmap)? Widen --center/--range or raise --tolerance.");
-    }
-    for h in &hits {
-        println!("      twin of slot {:>3} at 0x{:016X}", h.value.s.number, h.address);
-    }
-
-    let stride = match args.stride {
-        Some(s) => s,
-        None => {
-            let anchors: Vec<(i32, usize)> =
-                hits.iter().map(|h| (h.value.s.number, h.address)).collect();
-            let g = sdk::server::infer_gentity_stride(&anchors)
-                .context("stride inference failed (hits disagree or only one slot matched); pass --stride")?;
-            println!("      inferred sizeof(gentity_t) = {} (0x{:X}), {} agreeing pair(s)", g.stride, g.stride, g.votes);
-            g.stride
-        }
-    };
-
-    // Several hits may belong to the same array: vote on the base.
-    let mut bases: HashMap<usize, usize> = HashMap::new();
-    for h in &hits {
-        if let Some(b) = gentities_base_checked(h.address, h.value.s.number, stride) {
-            *bases.entry(b).or_insert(0) += 1;
-        }
-    }
-    let (&base, &votes) = bases
-        .iter()
-        .max_by_key(|&(b, v)| (*v, std::cmp::Reverse(*b)))
-        .context("no consistent base address")?;
-    println!("      base 0x{base:016X} ({votes} twin(s) agree)");
-
-    engine_cross_check(handle, base, stride);
-    Ok((base, stride))
-}
-
-/// Look for `sv.gentities` in the exe image: an 8-byte pointer equal
-/// to `base`, followed by `gentitySize` (an `int` equal to `stride`).
-fn engine_cross_check(handle: &process::ProcessHandle, base: usize, stride: usize) {
-    let Ok(proc) = process::find_by_name(crate::util::DEFAULT_PROCESS) else {
-        return;
-    };
-    let (start, end) = (proc.base_address, proc.base_address + proc.module_size);
-    let found = scanner::scan_aligned::<u64, _>(handle, start, end, 8, |v| *v == base as u64);
-    match found {
-        Ok(mut hits) if !hits.is_empty() => {
-            hits.sort_by_key(|h| h.address);
-            hits.dedup_by_key(|h| h.address);
-            for h in hits {
-                let size = handle.read::<i32>(h.address + 8).unwrap_or(-1);
-                let num = handle.read::<i32>(h.address + 12).unwrap_or(-1);
-                let tag = if size as usize == stride { "MATCH sv.gentities" } else { "pointer only" };
-                println!(
-                    "      engine: exe+0x{:X} holds the base; +8 = {size}, +12 = {num}  [{tag}]",
-                    h.address - proc.base_address
-                );
-            }
-        }
-        _ => println!("      engine: no pointer to the base found in the exe image."),
-    }
 }

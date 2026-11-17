@@ -95,3 +95,130 @@ pub fn newest_snapshot_addr(handle: &ProcessHandle, addrs: &[usize]) -> Option<u
         .max_by_key(|&(t, _)| t)
         .map(|(_, a)| a)
 }
+
+// ---------------------------------------------------------------------
+// g_entities[] (server-side array, listen server only)
+// ---------------------------------------------------------------------
+
+/// Default centre of the window scanned for the server entity array.
+pub const DEFAULT_SERVER_CENTER: usize = 0x07000000;
+/// Default half-range of that window.
+pub const DEFAULT_SERVER_RANGE: usize = 0x04000000;
+/// Max distance allowed between `r.currentOrigin` and `s.pos.trBase`
+/// of one candidate entity (should be near-zero for a real entity).
+const SERVER_ORIGIN_TOLERANCE: f32 = 64.0;
+
+/// Parameters for [`locate_gentities`].
+pub struct GentitiesLookup {
+    /// Centre of the scan window.
+    pub center: usize,
+    /// Half-range of the scan window.
+    pub range: usize,
+    /// Max world-unit gap between a client player and its server twin.
+    pub tolerance: f32,
+    /// Force `sizeof(gentity_t)` instead of inferring it.
+    pub stride: Option<usize>,
+}
+
+/// Find `g_entities[]` by matching known client-side players against
+/// memory, inferring the array stride, then cross-checking against
+/// the engine's own `sv.gentities` pointer. Returns `(base, stride)`.
+///
+/// Shared by `server-entities` and `esp --server`.
+pub fn locate_gentities(
+    handle: &ProcessHandle,
+    client_players: &[sdk::EntityState],
+    opts: &GentitiesLookup,
+) -> anyhow::Result<(usize, usize)> {
+    use anyhow::{bail, Context};
+    use std::collections::HashMap;
+
+    if client_players.is_empty() {
+        bail!("no player in the client snapshot to use as ground truth. Load a map with bots, or pass --sv-rva.");
+    }
+    if client_players.len() < 2 && opts.stride.is_none() {
+        bail!("only one player visible: cannot infer sizeof(gentity_t). Pass --stride, or face a bot and retry.");
+    }
+
+    let (start, end) = (
+        opts.center.saturating_sub(opts.range),
+        opts.center.saturating_add(opts.range),
+    );
+    println!(
+        "Scanning 0x{start:X}..0x{end:X} ({} MiB) for the server twin of {} player(s)...",
+        (end - start) / (1024 * 1024),
+        client_players.len()
+    );
+
+    let tol = opts.tolerance;
+    let mut hits = scanner::scan_aligned::<sdk::SharedEntity, _>(handle, start, end, 4, |e| {
+        client_players
+            .iter()
+            .any(|r| sdk::server::is_server_twin(e, r, tol, SERVER_ORIGIN_TOLERANCE))
+    })?;
+    // A hit exactly on a chunk boundary is seen by two consecutive reads.
+    hits.sort_by_key(|h| h.address);
+    hits.dedup_by_key(|h| h.address);
+    if hits.is_empty() {
+        bail!("no server-side twin found. Is this a listen server (/devmap)? Widen --center/--range or raise --tolerance.");
+    }
+    for h in &hits {
+        println!("  twin of slot {:>3} at 0x{:016X}", h.value.s.number, h.address);
+    }
+
+    let stride = match opts.stride {
+        Some(s) => s,
+        None => {
+            let anchors: Vec<(i32, usize)> =
+                hits.iter().map(|h| (h.value.s.number, h.address)).collect();
+            let g = sdk::server::infer_gentity_stride(&anchors)
+                .context("stride inference failed (hits disagree or only one slot matched); pass --stride")?;
+            println!(
+                "  inferred sizeof(gentity_t) = {} (0x{:X}), {} agreeing pair(s)",
+                g.stride, g.stride, g.votes
+            );
+            g.stride
+        }
+    };
+
+    // Several hits may belong to the same array: vote on the base.
+    let mut bases: HashMap<usize, usize> = HashMap::new();
+    for h in &hits {
+        if let Some(b) = sdk::gentities_base_checked(h.address, h.value.s.number, stride) {
+            *bases.entry(b).or_insert(0) += 1;
+        }
+    }
+    let (&base, &votes) = bases
+        .iter()
+        .max_by_key(|&(b, v)| (*v, std::cmp::Reverse(*b)))
+        .context("no consistent base address")?;
+    println!("  base 0x{base:016X} ({votes} twin(s) agree)");
+
+    engine_cross_check(handle, base, stride);
+    Ok((base, stride))
+}
+
+/// Look for `sv.gentities` in the exe image: an 8-byte pointer equal
+/// to `base`, followed by `gentitySize` (an `int` equal to `stride`).
+fn engine_cross_check(handle: &ProcessHandle, base: usize, stride: usize) {
+    let Ok(proc) = process::find_by_name(crate::util::DEFAULT_PROCESS) else {
+        return;
+    };
+    let (start, end) = (proc.base_address, proc.base_address + proc.module_size);
+    match scanner::scan_aligned::<u64, _>(handle, start, end, 8, |v| *v == base as u64) {
+        Ok(mut hits) if !hits.is_empty() => {
+            hits.sort_by_key(|h| h.address);
+            hits.dedup_by_key(|h| h.address);
+            for h in hits {
+                let size = handle.read::<i32>(h.address + 8).unwrap_or(-1);
+                let num = handle.read::<i32>(h.address + 12).unwrap_or(-1);
+                let tag = if size as usize == stride { "MATCH sv.gentities" } else { "pointer only" };
+                println!(
+                    "  engine: exe+0x{:X} holds the base; +8 = {size}, +12 = {num}  [{tag}]",
+                    h.address - proc.base_address
+                );
+            }
+        }
+        _ => println!("  engine: no pointer to the base found in the exe image."),
+    }
+}

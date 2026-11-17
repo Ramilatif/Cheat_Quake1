@@ -8,11 +8,20 @@
 //! click-through layered window sitting on top of the game. No code
 //! injection, no engine patch — same external-read architecture as
 //! the rest of this toolkit.
+//!
+//! With `--server`, it additionally locates the server's
+//! authoritative entity array (`g_entities[]`, see `server-entities`
+//! and `docs/server-reverse.md`) and draws a second, differently
+//! coloured box for any player the server knows about but did not
+//! send to this client this tick (filtered by the PVS). The two
+//! sources are kept visually and logically separate: a box drawn from
+//! the client snapshot behaves exactly as before, whether or not
+//! `--server` is used.
 
 use anyhow::{Context, Result};
 use clap::Args as ClapArgs;
-use sdk::{EntityType, Snapshot, Vec3, MAX_ENTITIES_IN_SNAPSHOT};
-use std::collections::HashMap;
+use sdk::{EntityState, EntityType, SharedEntity, Snapshot, Vec3, MAX_CLIENTS, MAX_ENTITIES_IN_SNAPSHOT};
+use std::collections::{HashMap, HashSet};
 use std::thread;
 use std::time::{Duration, Instant};
 use windows::core::PCWSTR;
@@ -30,7 +39,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use crate::locate::locate_snapshot_addrs;
+use crate::locate::{self, locate_snapshot_addrs};
 use sdk::SnapshotFilter;
 use crate::util::{parse_hex, DEFAULT_PROCESS};
 
@@ -43,13 +52,17 @@ const EF_DEAD: i32 = 0x0000_0001;
 const PLAYER_HEIGHT: f32 = 40.0;
 /// Black is the overlay's transparent color key — never draw with it.
 const COLOR_KEY: u32 = 0x00000000;
-const BOX_COLOR: u32 = 0x0000FF; // BGR: red
-const TEXT_COLOR: u32 = 0x00FFFF; // BGR: yellow
+/// COLORREF is 0x00BBGGRR.
+const BOX_COLOR: u32 = 0x0000FF; // red — entity the client snapshot actually received
+const TEXT_COLOR: u32 = 0x00FFFF; // yellow
+const HIDDEN_BOX_COLOR: u32 = 0x00FF00; // green — entity only visible via g_entities (PVS reveal)
+const HIDDEN_TEXT_COLOR: u32 = 0x90FF90; // light green
 
-/// Last real snapshot position/velocity for one tracked enemy, used to
-/// extrapolate its position between real snapshots (which only arrive
-/// at sv_fps, ~20-40Hz) so the box moves smoothly at the overlay's own
-/// refresh rate instead of stair-stepping.
+/// Last real position/velocity for one tracked player, used to
+/// extrapolate its position between real ticks (which only arrive at
+/// sv_fps, ~20-40Hz) so the box moves smoothly at the overlay's own
+/// refresh rate instead of stair-stepping. Used for both the
+/// client-visible set and, with `--server`, the PVS-hidden set.
 struct Track {
     pos: Vec3,
     vel: Vec3,
@@ -75,6 +88,35 @@ pub struct Args {
     /// Horizontal field of view in degrees (in-game `cg_fov` cvar).
     #[arg(long, default_value = "90.0")]
     pub fov: f32,
+
+    /// Also locate the server's g_entities[] (listen server only) and
+    /// draw players the server knows about but did not send to this
+    /// client this tick (filtered by the PVS), in a different color.
+    #[arg(long)]
+    pub server: bool,
+
+    /// RVA (hex) of sv.gentities, as printed by a previous
+    /// `server-entities` or `esp --server` run. Skips the scan.
+    #[arg(long, value_parser = parse_hex)]
+    pub sv_rva: Option<usize>,
+
+    /// Centre of the window scanned for g_entities[] (hex), used only
+    /// when --server is set and --sv-rva is not.
+    #[arg(long, value_parser = parse_hex)]
+    pub sv_center: Option<usize>,
+
+    /// Half-range of that window (hex).
+    #[arg(long, value_parser = parse_hex)]
+    pub sv_range: Option<usize>,
+
+    /// Max world-unit gap between a client player and its server
+    /// twin, used only while locating g_entities[].
+    #[arg(long, default_value = "150.0")]
+    pub sv_tolerance: f32,
+
+    /// Force sizeof(gentity_t) (hex) instead of inferring it.
+    #[arg(long, value_parser = parse_hex)]
+    pub sv_stride: Option<usize>,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -101,6 +143,37 @@ pub fn run(args: Args) -> Result<()> {
         proc.name, proc.pid, width, height, top_left.x, top_left.y
     );
 
+    // --- Server-side wallhack (optional): locate g_entities[] once. ---
+    // `gentities` is `(base, stride)` once found. `server_locate_failed`
+    // is set after one failed attempt so a bad scan does not retry
+    // every tick; the client-only ESP keeps working either way.
+    let mut gentities: Option<(usize, usize)> = None;
+    let mut server_locate_failed = false;
+    if args.server {
+        if let Some(rva) = args.sv_rva {
+            let at = proc.base_address + rva;
+            let resolved = handle
+                .read::<u64>(at)
+                .ok()
+                .zip(handle.read::<i32>(at + 8).ok())
+                .filter(|&(ptr, size)| ptr != 0 && size as usize >= sdk::server::GENTITY_MIN_STRIDE);
+            match resolved {
+                Some((ptr, size)) => {
+                    println!(
+                        "Server-side wallhack: g_entities @ 0x{ptr:016X} (via --sv-rva), stride {size}."
+                    );
+                    gentities = Some((ptr as usize, size as usize));
+                }
+                None => {
+                    eprintln!(
+                        "Server-side wallhack disabled: --sv-rva 0x{rva:X} did not resolve to a valid g_entities pointer."
+                    );
+                    server_locate_failed = true;
+                }
+            }
+        }
+    }
+
     let overlay = create_overlay_window(top_left.x, top_left.y, width, height)?;
 
     println!("Overlay up. Ctrl+C in this terminal to stop.\n");
@@ -108,6 +181,7 @@ pub fn run(args: Args) -> Result<()> {
     let mut cached_addrs: Vec<usize> = locate_snapshot_addrs(&handle, start, end, SnapshotFilter::Loose);
     let mut last_server_time = i32::MIN;
     let mut tracks: HashMap<i32, Track> = HashMap::new();
+    let mut hidden_tracks: HashMap<i32, Track> = HashMap::new();
 
     loop {
         pump_messages();
@@ -182,11 +256,10 @@ pub fn run(args: Args) -> Result<()> {
             // anyone no longer present (dead, disconnected, out of
             // range) so their box doesn't linger extrapolated forever.
             let dt_server = (snap.header.server_time - last_server_time) as f32 / 1000.0;
-            let mut seen = std::collections::HashSet::new();
+            let n = snap.header.num_entities.clamp(0, MAX_ENTITIES_IN_SNAPSHOT as i32) as usize;
+            let mut seen = HashSet::new();
 
-            for es in &snap.entities
-                [..snap.header.num_entities.min(MAX_ENTITIES_IN_SNAPSHOT as i32) as usize]
-            {
+            for es in &snap.entities[..n] {
                 if es.e_type != EntityType::PLAYER {
                     continue;
                 }
@@ -219,36 +292,157 @@ pub fn run(args: Args) -> Result<()> {
             }
 
             tracks.retain(|client_num, _| seen.contains(client_num));
+
+            // --- Server-side reveal: try to locate g_entities[] once
+            // --- (scan path only; --sv-rva already resolved above),
+            // --- then, once located, refresh the hidden set every tick.
+            if args.server && gentities.is_none() && !server_locate_failed {
+                let players_for_locate: Vec<EntityState> = snap.entities[..n]
+                    .iter()
+                    .filter(|e| e.e_type == EntityType::PLAYER)
+                    .copied()
+                    .collect();
+                let opts = locate::GentitiesLookup {
+                    center: args.sv_center.unwrap_or(locate::DEFAULT_SERVER_CENTER),
+                    range: args.sv_range.unwrap_or(locate::DEFAULT_SERVER_RANGE),
+                    tolerance: args.sv_tolerance,
+                    stride: args.sv_stride,
+                };
+                match locate::locate_gentities(&handle, &players_for_locate, &opts) {
+                    Ok((b, s)) => {
+                        println!("Server-side wallhack enabled: g_entities @ 0x{b:016X}, stride {s}.\n");
+                        gentities = Some((b, s));
+                    }
+                    Err(e) => {
+                        eprintln!("Server-side wallhack disabled: {e}\n");
+                        server_locate_failed = true;
+                    }
+                }
+            }
+
+            if let Some((base, stride)) = gentities {
+                refresh_hidden_tracks(
+                    &handle,
+                    base,
+                    stride,
+                    snap.header.ps.client_num,
+                    &seen,
+                    dt_server,
+                    last_server_time,
+                    &mut hidden_tracks,
+                );
+            }
+
             last_server_time = snap.header.server_time;
         }
 
-        let mut boxes: Vec<(f32, f32, f32, f32, i32)> = Vec::new();
-        for (&client_num, track) in &tracks {
-            let elapsed = track.wall.elapsed().as_secs_f32();
-            let predicted = Vec3::new(
-                track.pos.x + track.vel.x * elapsed,
-                track.pos.y + track.vel.y * elapsed,
-                track.pos.z + track.vel.z * elapsed,
-            );
-            if let Some(b) = project_player_box(
-                predicted,
-                client_num,
-                eye,
-                forward,
-                right,
-                up,
-                width as f32,
-                height as f32,
-                args.fov,
-            ) {
-                boxes.push(b);
-            }
-        }
+        let client_boxes = project_tracks(&tracks, eye, forward, right, up, width, height, args.fov);
+        let hidden_boxes = project_tracks(&hidden_tracks, eye, forward, right, up, width, height, args.fov);
 
-        draw_overlay(overlay, width, height, &boxes);
+        draw_overlay(overlay, width, height, &client_boxes, &hidden_boxes);
 
         thread::sleep(Duration::from_millis(args.interval_ms));
     }
+}
+
+/// Re-read the player slots (0..MAX_CLIENTS) of `g_entities[]` in one
+/// bulk read, and refresh `hidden_tracks` with whoever is a living,
+/// linked, non-self player that the client did **not** receive this
+/// tick (`seen`). An entity that becomes client-visible is dropped
+/// from here automatically (it is excluded by the `seen` check, then
+/// pruned by `retain`), so a player is never drawn as both client-
+/// visible and server-hidden at once.
+#[allow(clippy::too_many_arguments)]
+fn refresh_hidden_tracks(
+    handle: &process::ProcessHandle,
+    base: usize,
+    stride: usize,
+    own_client_num: i32,
+    seen: &HashSet<i32>,
+    dt_server: f32,
+    last_server_time: i32,
+    hidden_tracks: &mut HashMap<i32, Track>,
+) {
+    let read_len = MAX_CLIENTS * stride;
+    let mut buf = vec![0u8; read_len];
+    if handle.read_into(base, &mut buf).is_err() {
+        return;
+    }
+
+    let mut hidden_seen = HashSet::new();
+    for i in 0..MAX_CLIENTS {
+        let off = i * stride;
+        if off + sdk::server::GENTITY_MIN_STRIDE > buf.len() {
+            break;
+        }
+        let e: &SharedEntity = bytemuck::from_bytes(&buf[off..off + sdk::server::GENTITY_MIN_STRIDE]);
+        if !e.is_player() || e.r.linked == 0 || e.s.number as usize != i {
+            continue;
+        }
+        let client_num = e.s.client_num;
+        if client_num == own_client_num || e.is_dead() || seen.contains(&client_num) {
+            continue;
+        }
+
+        hidden_seen.insert(client_num);
+        let new_pos = e.r.current_origin;
+        let vel = match hidden_tracks.get(&client_num) {
+            Some(prev) if last_server_time != i32::MIN && dt_server > 0.001 => Vec3::new(
+                (new_pos.x - prev.pos.x) / dt_server,
+                (new_pos.y - prev.pos.y) / dt_server,
+                (new_pos.z - prev.pos.z) / dt_server,
+            ),
+            _ => Vec3::ZERO,
+        };
+        hidden_tracks.insert(
+            client_num,
+            Track {
+                pos: new_pos,
+                vel,
+                wall: Instant::now(),
+            },
+        );
+    }
+    hidden_tracks.retain(|client_num, _| hidden_seen.contains(client_num));
+}
+
+/// Extrapolate every tracked entity to "now" and project it to a
+/// screen-space box. Shared by the client-visible and the
+/// server-hidden sets — same math, different input map.
+#[allow(clippy::too_many_arguments)]
+fn project_tracks(
+    tracks: &HashMap<i32, Track>,
+    eye: Vec3,
+    forward: Vec3,
+    right: Vec3,
+    up: Vec3,
+    screen_w: i32,
+    screen_h: i32,
+    fov_deg: f32,
+) -> Vec<(f32, f32, f32, f32, i32)> {
+    let mut boxes = Vec::new();
+    for (&client_num, track) in tracks {
+        let elapsed = track.wall.elapsed().as_secs_f32();
+        let predicted = Vec3::new(
+            track.pos.x + track.vel.x * elapsed,
+            track.pos.y + track.vel.y * elapsed,
+            track.pos.z + track.vel.z * elapsed,
+        );
+        if let Some(b) = project_player_box(
+            predicted,
+            client_num,
+            eye,
+            forward,
+            right,
+            up,
+            screen_w as f32,
+            screen_h as f32,
+            fov_deg,
+        ) {
+            boxes.push(b);
+        }
+    }
+    boxes
 }
 
 /// Turn one (possibly extrapolated) feet position into an on-screen
@@ -422,9 +616,16 @@ fn pump_messages() {
     }
 }
 
-/// Clear the overlay to the transparent color key, then draw one box
-/// (plus a client-number label) per living enemy on screen.
-fn draw_overlay(hwnd: HWND, width: i32, height: i32, boxes: &[(f32, f32, f32, f32, i32)]) {
+/// Clear the overlay to the transparent color key, then draw the
+/// client-visible boxes (red, "#n") and the server-hidden boxes
+/// (green, "SV#n") on top.
+fn draw_overlay(
+    hwnd: HWND,
+    width: i32,
+    height: i32,
+    client_boxes: &[(f32, f32, f32, f32, i32)],
+    hidden_boxes: &[(f32, f32, f32, f32, i32)],
+) {
     unsafe {
         let hdc = GetDC(hwnd);
         if hdc.is_invalid() {
@@ -437,16 +638,20 @@ fn draw_overlay(hwnd: HWND, width: i32, height: i32, boxes: &[(f32, f32, f32, f3
         let old_pen = SelectObject(hdc, HGDIOBJ::from(bg_pen));
         let _ = Rectangle(hdc, 0, 0, width, height);
 
+        SetBkMode(hdc, TRANSPARENT);
+
         let box_pen = CreatePen(PS_SOLID, 2, COLORREF(BOX_COLOR));
         SelectObject(hdc, HGDIOBJ::from(box_pen));
-        SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, COLORREF(TEXT_COLOR));
+        for &(left, top, right, bottom, client_num) in client_boxes {
+            draw_one_box(hdc, left, top, right, bottom, &format!("#{client_num}"));
+        }
 
-        for &(left, top, right, bottom, client_num) in boxes {
-            let _ = Rectangle(hdc, left as i32, top as i32, right as i32, bottom as i32);
-            let label = w(&format!("#{client_num}"));
-            let label_slice = &label[..label.len().saturating_sub(1)]; // drop NUL for TextOutW len
-            let _ = TextOutW(hdc, left as i32, (top as i32) - 16, label_slice);
+        let hidden_pen = CreatePen(PS_SOLID, 2, COLORREF(HIDDEN_BOX_COLOR));
+        SelectObject(hdc, HGDIOBJ::from(hidden_pen));
+        SetTextColor(hdc, COLORREF(HIDDEN_TEXT_COLOR));
+        for &(left, top, right, bottom, client_num) in hidden_boxes {
+            draw_one_box(hdc, left, top, right, bottom, &format!("SV#{client_num}"));
         }
 
         SelectObject(hdc, old_brush);
@@ -454,7 +659,19 @@ fn draw_overlay(hwnd: HWND, width: i32, height: i32, boxes: &[(f32, f32, f32, f3
         let _ = DeleteObject(HGDIOBJ::from(bg_brush));
         let _ = DeleteObject(HGDIOBJ::from(bg_pen));
         let _ = DeleteObject(HGDIOBJ::from(box_pen));
+        let _ = DeleteObject(HGDIOBJ::from(hidden_pen));
         ReleaseDC(hwnd, hdc);
+    }
+}
+
+/// Draw one box plus its label, in whatever pen/text color is
+/// currently selected into `hdc`.
+fn draw_one_box(hdc: windows::Win32::Graphics::Gdi::HDC, left: f32, top: f32, right: f32, bottom: f32, label: &str) {
+    unsafe {
+        let _ = Rectangle(hdc, left as i32, top as i32, right as i32, bottom as i32);
+        let wide = w(label);
+        let slice = &wide[..wide.len().saturating_sub(1)]; // drop NUL for TextOutW len
+        let _ = TextOutW(hdc, left as i32, (top as i32) - 16, slice);
     }
 }
 
