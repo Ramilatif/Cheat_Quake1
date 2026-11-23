@@ -39,9 +39,129 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use crate::locate::{self, locate_snapshot_addrs};
+use crate::locate;
 use sdk::SnapshotFilter;
 use crate::util::{parse_hex, DEFAULT_PROCESS};
+
+/// A real `serverTime` is milliseconds since map start. Values above
+/// this (~5.8 days) are almost always a float or pointer read as an
+/// integer (e.g. 4.0f = 1082130432) and mean a false-positive match.
+const MAX_SERVER_TIME: i32 = 500_000_000;
+
+/// Loose plausibility plus the serverTime bound above.
+fn valid_snapshot(h: &sdk::SnapshotHeader) -> bool {
+    sdk::looks_like_snapshot(h, SnapshotFilter::Loose) && h.server_time < MAX_SERVER_TIME
+}
+
+/// Scan, keep the addresses that pass `valid_snapshot`, then keep only
+/// those whose `serverTime` actually advances over ~200 ms. Stale
+/// copies of a snapshot (old buffers, server-side leftovers) look valid
+/// but never move; the live `cg.snap` does. If nothing moves (game
+/// paused), all valid candidates are returned.
+fn locate_valid(
+    handle: &process::ProcessHandle,
+    start: usize,
+    end: usize,
+    gent: Option<(usize, usize)>,
+) -> (Vec<usize>, bool) {
+    // Candidates inside g_entities[] are server data that happens to
+    // look like a snapshot header (e.g. trTime changes every tick).
+    let gent_range = gent.map(|(b, st)| (b, b + sdk::MAX_GENTITIES * st));
+    let valid: Vec<(usize, i32)> = locate::find_snapshot_candidates(handle, start, end, SnapshotFilter::Loose)
+        .into_iter()
+        .filter(|&a| gent_range.map_or(true, |(lo, hi)| a < lo || a >= hi))
+        .filter_map(|a| {
+            handle
+                .read::<sdk::SnapshotHeader>(a)
+                .ok()
+                .filter(|h| valid_snapshot(h))
+                .map(|h| (a, h.server_time))
+        })
+        .collect();
+    if valid.is_empty() {
+        return (Vec::new(), false);
+    }
+
+    // Strong check (listen server): the local player's origin in the
+    // client snapshot must match its server entity.
+    if let Some((base, stride)) = gent {
+        let matched: Vec<usize> = valid
+            .iter()
+            .filter(|&&(a, _)| snapshot_matches_server(handle, a, base, stride))
+            .map(|&(a, _)| a)
+            .collect();
+        eprintln!("Snapshot candidates: {} valid, {} matching the server player", valid.len(), matched.len());
+        if !matched.is_empty() {
+            return (matched, true);
+        }
+    }
+    thread::sleep(Duration::from_millis(200));
+    let live: Vec<usize> = valid
+        .iter()
+        .filter(|&&(a, t)| {
+            handle
+                .read::<sdk::SnapshotHeader>(a)
+                .map(|h| valid_snapshot(&h) && h.server_time > t)
+                .unwrap_or(false)
+        })
+        .map(|&(a, _)| a)
+        .collect();
+    eprintln!(
+        "Snapshot candidates: {} valid, {} live ({:?})",
+        valid.len(),
+        live.len(),
+        valid.iter().map(|&(a, t)| format!("0x{a:X}@{t}")).collect::<Vec<_>>()
+    );
+    if live.is_empty() {
+        (valid.into_iter().map(|(a, _)| a).collect(), false)
+    } else {
+        (live, true)
+    }
+}
+
+/// `true` if the snapshot at `addr` has `ps.origin` within 150 units of
+/// the server entity of its own `ps.clientNum`.
+fn snapshot_matches_server(handle: &process::ProcessHandle, addr: usize, base: usize, stride: usize) -> bool {
+    let Ok(h) = handle.read::<sdk::SnapshotHeader>(addr) else {
+        return false;
+    };
+    let cn = h.ps.client_num;
+    if !(0..sdk::MAX_CLIENTS as i32).contains(&cn) {
+        return false;
+    }
+    let Ok(e) = handle.read::<sdk::SharedEntity>(base + cn as usize * stride) else {
+        return false;
+    };
+    e.is_player() && h.ps.origin.sub(e.r.current_origin).length() < 150.0
+}
+
+/// Wide fallback window used once when the default one holds no live
+/// snapshot (the game heap can move between launches).
+const WIDE_START: usize = 0x0100_0000;
+const WIDE_END: usize = 0x4000_0000;
+
+/// Locate the live snapshot: default window first, then (once) the
+/// wide window if nothing live was found.
+fn locate_live(
+    handle: &process::ProcessHandle,
+    start: usize,
+    end: usize,
+    wide_tried: &mut bool,
+    gent: Option<(usize, usize)>,
+) -> Vec<usize> {
+    let (addrs, live) = locate_valid(handle, start, end, gent);
+    if live || *wide_tried {
+        return addrs;
+    }
+    *wide_tried = true;
+    eprintln!("No live snapshot in the default window, scanning 0x{WIDE_START:X}..0x{WIDE_END:X} (one-off, may take a while)...");
+    let (wide, wide_live) = locate_valid(handle, WIDE_START, WIDE_END, gent);
+    if wide_live {
+        wide
+    } else {
+        addrs
+    }
+}
 
 const DEFAULT_CENTER: usize = 0x07000000;
 const DEFAULT_RANGE: usize = 0x02000000;
@@ -49,7 +169,8 @@ const DEFAULT_RANGE: usize = 0x02000000;
 const EF_DEAD: i32 = 0x0000_0001;
 /// Rough standing player height (bbox maxs.z), in world units, used
 /// to turn a single origin point into a head-to-feet screen box.
-const PLAYER_HEIGHT: f32 = 40.0;
+const BBOX_TOP: f32 = 32.0;
+const BBOX_BOTTOM: f32 = -24.0;
 /// Black is the overlay's transparent color key — never draw with it.
 const COLOR_KEY: u32 = 0x00000000;
 /// COLORREF is 0x00BBGGRR.
@@ -117,6 +238,22 @@ pub struct Args {
     /// Force sizeof(gentity_t) (hex) instead of inferring it.
     #[arg(long, value_parser = parse_hex)]
     pub sv_stride: Option<usize>,
+
+    /// Print a status line once per second (snapshot found, players
+    /// seen by the client, players seen by the server, hidden count).
+    #[arg(long)]
+    pub debug: bool,
+}
+
+/// Per-tick counters of the server-side pass, for `--debug`.
+#[derive(Default, Clone, Copy)]
+struct HiddenStats {
+    /// Player slots with a valid, linked player entity on the server.
+    server_players: usize,
+    /// Of those: own entity, dead, or already in the client snapshot.
+    skipped: usize,
+    /// Kept: known to the server only (PVS-hidden).
+    hidden: usize,
 }
 
 pub fn run(args: Args) -> Result<()> {
@@ -178,10 +315,17 @@ pub fn run(args: Args) -> Result<()> {
 
     println!("Overlay up. Ctrl+C in this terminal to stop.\n");
 
-    let mut cached_addrs: Vec<usize> = locate_snapshot_addrs(&handle, start, end, SnapshotFilter::Loose);
+    let mut wide_tried = false;
+    let mut cached_addrs: Vec<usize> = locate_live(&handle, start, end, &mut wide_tried, gentities);
     let mut last_server_time = i32::MIN;
     let mut tracks: HashMap<i32, Track> = HashMap::new();
     let mut hidden_tracks: HashMap<i32, Track> = HashMap::new();
+    let mut stats = HiddenStats::default();
+    let mut client_players_seen = 0usize;
+    let mut last_debug = Instant::now();
+    let mut no_snapshot_ticks = 0u32;
+    let mut stale_time = i32::MIN;
+    let mut stale_since = Instant::now();
 
     loop {
         pump_messages();
@@ -207,16 +351,25 @@ pub fn run(args: Args) -> Result<()> {
             && cached_addrs.iter().any(|&a| {
                 handle
                     .read::<sdk::SnapshotHeader>(a)
-                    .map(|h| sdk::looks_like_snapshot(&h, SnapshotFilter::Loose))
+                    .map(|h| valid_snapshot(&h))
                     .unwrap_or(false)
             });
         if !cache_ok {
-            let fresh = locate_snapshot_addrs(&handle, start, end, SnapshotFilter::Loose);
+            let fresh = locate_live(&handle, start, end, &mut wide_tried, gentities);
             if fresh.is_empty() {
                 cached_addrs.clear();
+                // Not in a match yet, or the cgame heap moved outside
+                // the scanned window (see --center / --range).
+                if no_snapshot_ticks % 50 == 0 {
+                    eprintln!(
+                        "No snapshot found in 0x{start:X}..0x{end:X} (join a match, or widen --range)."
+                    );
+                }
+                no_snapshot_ticks = no_snapshot_ticks.wrapping_add(1);
                 thread::sleep(Duration::from_millis(args.interval_ms));
                 continue;
             }
+            no_snapshot_ticks = 0;
             cached_addrs = fresh;
         }
 
@@ -226,6 +379,8 @@ pub fn run(args: Args) -> Result<()> {
             .max_by_key(|&a| {
                 handle
                     .read::<sdk::SnapshotHeader>(a)
+                    .ok()
+                    .filter(|h| valid_snapshot(h))
                     .map(|h| h.server_time)
                     .unwrap_or(i32::MIN)
             })
@@ -240,11 +395,28 @@ pub fn run(args: Args) -> Result<()> {
             }
         };
 
+        // Frozen serverTime = stale copy (or paused game): drop the
+        // cache so the next tick rescans for the live snapshot.
+        if snap.header.server_time != stale_time {
+            stale_time = snap.header.server_time;
+            stale_since = Instant::now();
+        } else if stale_since.elapsed() > Duration::from_millis(1500) {
+            cached_addrs.clear();
+            stale_since = Instant::now();
+            continue;
+        }
+
         // Our own position/angles come from cg.predictedPlayerState,
         // which the game updates every render frame via client-side
         // prediction (not just at network tick rate) — so it's safe
         // to read fresh every poll, no extrapolation needed here.
-        let eye = snap.header.ps.origin;
+        // ps.origin is the player's centre, not the camera: the eye sits
+        // `viewheight` units above it (26 standing, 12 crouching).
+        let eye = Vec3::new(
+            snap.header.ps.origin.x,
+            snap.header.ps.origin.y,
+            snap.header.ps.origin.z + snap.header.ps.viewheight as f32,
+        );
         let (forward, right, up) = angle_vectors(
             snap.header.ps.viewangles.y, // yaw
             snap.header.ps.viewangles.x, // pitch
@@ -292,6 +464,7 @@ pub fn run(args: Args) -> Result<()> {
             }
 
             tracks.retain(|client_num, _| seen.contains(client_num));
+            client_players_seen = seen.len();
 
             // --- Server-side reveal: try to locate g_entities[] once
             // --- (scan path only; --sv-rva already resolved above),
@@ -321,7 +494,7 @@ pub fn run(args: Args) -> Result<()> {
             }
 
             if let Some((base, stride)) = gentities {
-                refresh_hidden_tracks(
+                stats = refresh_hidden_tracks(
                     &handle,
                     base,
                     stride,
@@ -338,6 +511,22 @@ pub fn run(args: Args) -> Result<()> {
 
         let client_boxes = project_tracks(&tracks, eye, forward, right, up, width, height, args.fov);
         let hidden_boxes = project_tracks(&hidden_tracks, eye, forward, right, up, width, height, args.fov);
+
+        if args.debug && last_debug.elapsed() >= Duration::from_secs(1) {
+            last_debug = Instant::now();
+            println!(
+                "[esp] snap=0x{snap_addr:X} t={} client_players={} | server={} (gentities {}) server_players={} skipped={} hidden={} | boxes red={} green={}",
+                snap.header.server_time,
+                client_players_seen,
+                if args.server { "on" } else { "off" },
+                if gentities.is_some() { "ok" } else { "none" },
+                stats.server_players,
+                stats.skipped,
+                stats.hidden,
+                client_boxes.len(),
+                hidden_boxes.len(),
+            );
+        }
 
         draw_overlay(overlay, width, height, &client_boxes, &hidden_boxes);
 
@@ -362,11 +551,12 @@ fn refresh_hidden_tracks(
     dt_server: f32,
     last_server_time: i32,
     hidden_tracks: &mut HashMap<i32, Track>,
-) {
+) -> HiddenStats {
+    let mut stats = HiddenStats::default();
     let read_len = MAX_CLIENTS * stride;
     let mut buf = vec![0u8; read_len];
     if handle.read_into(base, &mut buf).is_err() {
-        return;
+        return stats;
     }
 
     let mut hidden_seen = HashSet::new();
@@ -375,14 +565,20 @@ fn refresh_hidden_tracks(
         if off + sdk::server::GENTITY_MIN_STRIDE > buf.len() {
             break;
         }
-        let e: &SharedEntity = bytemuck::from_bytes(&buf[off..off + sdk::server::GENTITY_MIN_STRIDE]);
+        // `buf` is a plain byte vector: read unaligned instead of
+        // casting a reference, which would panic on a misaligned slice.
+        let e: SharedEntity =
+            bytemuck::pod_read_unaligned(&buf[off..off + sdk::server::GENTITY_MIN_STRIDE]);
         if !e.is_player() || e.r.linked == 0 || e.s.number as usize != i {
             continue;
         }
+        stats.server_players += 1;
         let client_num = e.s.client_num;
         if client_num == own_client_num || e.is_dead() || seen.contains(&client_num) {
+            stats.skipped += 1;
             continue;
         }
+        stats.hidden += 1;
 
         hidden_seen.insert(client_num);
         let new_pos = e.r.current_origin;
@@ -404,6 +600,7 @@ fn refresh_hidden_tracks(
         );
     }
     hidden_tracks.retain(|client_num, _| hidden_seen.contains(client_num));
+    stats
 }
 
 /// Extrapolate every tracked entity to "now" and project it to a
@@ -459,13 +656,16 @@ fn project_player_box(
     screen_h: f32,
     fov_deg: f32,
 ) -> Option<(f32, f32, f32, f32, i32)> {
-    let head = Vec3::new(feet.x, feet.y, feet.z + PLAYER_HEIGHT);
+    // `feet` is really entity origin (bbox centre): the standing bbox
+    // spans z-24 (feet) to z+32 (top of head).
+    let head = Vec3::new(feet.x, feet.y, feet.z + BBOX_TOP);
+    let feet = Vec3::new(feet.x, feet.y, feet.z + BBOX_BOTTOM);
 
     let (fx, fy) = world_to_screen(feet, eye, forward, right, up, screen_w, screen_h, fov_deg)?;
     let (hx, hy) = world_to_screen(head, eye, forward, right, up, screen_w, screen_h, fov_deg)?;
 
     let box_h = (fy - hy).abs().max(4.0);
-    let box_w = box_h * 0.5;
+    let box_w = box_h * 0.55;
     let cx = (fx + hx) * 0.5;
     let top = hy.min(fy);
     let bottom = hy.max(fy);
