@@ -11,7 +11,7 @@
 //!
 //! With `--server`, it additionally locates the server's
 //! authoritative entity array (`g_entities[]`, see `server-entities`
-//! and `docs/server-reverse.md`) and draws a second, differently
+//! and `ServerSide/server-reverse.md`) and draws a second, differently
 //! coloured box for any player the server knows about but did not
 //! send to this client this tick (filtered by the PVS). The two
 //! sources are kept visually and logically separate: a box drawn from

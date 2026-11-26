@@ -319,13 +319,16 @@ Ce qu'on a appris en pratique en allant du HP à la liste des joueurs :
 
 ## 9. Pour aller plus loin
 
-- Implémenter la lecture côté serveur (`g_entities[]`) pour les
-  parties locales — voir limite §7.
+- Lecture côté serveur (`g_entities[]`) pour les parties locales :
+  réalisée, voir `ServerSide/server-reverse.md`.
 - Boucler `dump-snapshot` à 10 Hz pour avoir un radar live.
 - Calculer le `pitch/yaw` vers chaque ennemi (`atan2(dy, dx)` et
   `atan2(dz, dist_xy)`) — première brique d'un aim-helper.
 - Cacher l'adresse de `cg.snap` trouvée pour éviter le scan complet à
-  chaque run, avec re-validation par `serverTime` croissant.
+  chaque run, avec re-validation par `serverTime` croissant (réalisé
+  dans `esp`, voir `ServerSide/server-reverse.md` §7).
 
-Ces extensions ne changent pas la limite PVS ; elles s'empilent toutes
-sur les données déjà visibles dans le snapshot.
+Ces extensions côté client ne changent pas la limite PVS ; elles
+s'empilent toutes sur les données déjà visibles dans le snapshot. Seule
+la lecture de l'état serveur, possible uniquement en partie hébergée
+localement, contourne cette limite.

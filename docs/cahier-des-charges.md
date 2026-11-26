@@ -41,7 +41,7 @@ Deux problèmes techniques :
 | 6 | Scan heap filtré sur `ET_PLAYER` | `players` | Livré |
 | 7 | Localiser `cg.activeSnapshots[2]` (53 772 o) par signature et afficher la frame | `snapshot` | Livré, validé en jeu |
 | 8 | Retrouver l'adresse du yaw de rendu par rondes de confirmation | `find-viewangles` | Livré |
-| 9 | Retrouver `g_entities[]` côté serveur (listen server), déduire `sizeof(gentity_t)`, comparer avec le snapshot client (démonstration du PVS) | `server-entities` | Écrit, testé sur mémoire simulée ; **à valider en jeu** |
+| 9 | Retrouver `g_entities[]` côté serveur (listen server), déduire `sizeof(gentity_t)`, comparer avec le snapshot client (démonstration du PVS) | `server-entities` | Livré, validé en jeu (stride mesuré : 804 octets) |
 
 ### 3.2 Fonctionnalités présentes mais expérimentales
 
@@ -51,7 +51,8 @@ Ces modules ont été développés au-delà du plan initial (qui ne prévoyait n
 |---|---|---|---|
 | Aimbot par écriture mémoire | `aimbot` | Écrit les angles vers le joueur le plus proche dans les adresses de vue et 32 copies de snapshot. | Expérimental ; les écritures atteignent des copies qui n'alimentent pas toujours le rendu. Pas de touche d'activation. |
 | Aimbot par entrée souris | `aim-mouse` | Calcule l'erreur angulaire, envoie des déplacements relatifs via `SendInput`, avec lissage, plafond par tick, bascule par touche, prédiction de cible. | Fonctionnel, nécessite de régler `sensitivity`, `m_yaw`, `m_pitch`. |
-| ESP / overlay | `esp` | Fenêtre transparente superposée dessinant des boîtes sur les joueurs du snapshot, avec extrapolation entre snapshots. | Fonctionnel ; limité par le PVS (le client ne reçoit pas les entités hors PVS). |
+| ESP / overlay | `esp` | Fenêtre transparente superposée dessinant des boîtes sur les joueurs du snapshot (rouge), avec extrapolation entre snapshots. | Fonctionnel, validé en jeu. |
+| ESP volet serveur | `esp --server` | Ajoute, en vert, les joueurs connus de `g_entities[]` mais absents du snapshot (filtrés par le PVS). Localisation du snapshot vivant validée par la position du joueur côté serveur. | Fonctionnel en partie hébergée localement, validé en jeu. |
 
 **Écarts assumés par rapport à la version précédente du cahier :**
 - L'overlay graphique n'est plus exclu du périmètre (il existe).
@@ -60,11 +61,11 @@ Ces modules ont été développés au-delà du plan initial (qui ne prévoyait n
 
 ### 3.3 Fonctionnalités planifiées
 
-- **Exploitation des données serveur** : liste complète des joueurs, vie, équipe, intégrées à l'ESP et au choix de cible.
+- **Exploitation des données serveur** : joueurs hors PVS affichés dans l'ESP (fait) ; vie et équipe dans l'ESP et choix de cible côté aim (à faire).
 - **Aimbot v2** : sélection de cible configurable (angle minimal, HP le plus faible), filtre d'équipe et de vivant, filtre de portée. *Les aspects de « discrétion » de l'ancienne version sont abandonnés : le projet étudie le contrôle et le protocole, pas l'évitement de détection.*
 - **UX** : `qcheat.toml`, `qcheat doctor`, mode TUI, logging structuré (`tracing`).
 - **Tests sur fixtures** : snapshot binaire capturé, rejoué hors-ligne pour tester le SDK et les parseurs en CI.
-- **Volet serveur** : localisation de `g_entities[]` et démonstration du PVS : fait dans `server-entities` (à valider en jeu). Reste : lecture détaillée de `sv_snapshot.c`, exploitation des données serveur (ex. ESP complet en local), validation des hypothèses de `docs/server-reverse.md` §6.
+- **Volet serveur** : localisation de `g_entities[]`, démonstration du PVS (`server-entities`) et affichage dans l'ESP (`esp --server`) : faits et validés en jeu. Reste : lecture détaillée de `sv_snapshot.c`, branchement de l'aim sur la localisation fiable du snapshot.
 
 ## 4. Choix de la cible : ioquake3
 
@@ -106,13 +107,13 @@ Workspace Cargo, quatre crates. Le graphe réel des dépendances est :
 |---|---|
 | Code source, workspace, `cargo build --release` → `qcheat.exe` | Présent |
 | `offsets.json` (tailles, offsets, RVA) | Présent, à nettoyer (anciens noms de binaires) |
-| `README.md` | Révisé pour refléter l'état réel |
-| `docs/reverse-engineering.md` | Présent |
+| `README.md` | Anglais, avec traduction française en bas de page |
+| `ClientSide/reverse-engineering.md` | Présent |
 | `docs/cahier-des-charges.md` | Présent (ce document) |
 | `docs/comprendre-le-projet.md` | Présent (explications, glossaire) |
-| `docs/server-reverse.md` | Présent (méthode, layout vérifié, hypothèses à valider) |
+| `ServerSide/server-reverse.md` | Présent (méthode, layout vérifié, mesures en jeu, ESP serveur) |
+| `docs/architecture.md` | Présent |
 | `qcheat.example.toml` | À produire (avec la couche config) |
-| `docs/architecture.md` | Optionnel |
 
 ## 7. Méthodologie et état d'avancement
 
@@ -125,12 +126,12 @@ Workspace Cargo, quatre crates. Le graphe réel des dépendances est :
 | 5 | CLI unifiée `qcheat` | Terminé |
 | 6 | Localisation de la variable d'angle de rendu (`find-viewangles`, RVA relevés) | Partiel — localisation de `cl` non retrouvée dans le code |
 | 7 | Aimbot v1 (`aimbot` mémoire, `aim-mouse` entrée) | Fonctionnel côté `aim-mouse`, expérimental côté `aimbot` |
-| 7bis | ESP overlay | Livré, limité par le PVS |
+| 7bis | ESP overlay | Livré, validé en jeu |
 | 8 | Factorisation du locator (fait) ; RVA en configuration (à faire) | En cours |
 | 9 | Aimbot v2 (sélection configurable, filtres) | Planifié |
 | 10 | UX (`qcheat.toml`, `doctor`, TUI, `tracing`) | Planifié |
 | 11 | Tests sur fixtures | Planifié |
-| 12 | Volet serveur (`g_entities[]`, comparaison PVS) | Code écrit, à valider en jeu |
+| 12 | Volet serveur (`g_entities[]`, comparaison PVS, ESP serveur) | Terminé, validé en jeu |
 | 13 | Documentation finale | En cours |
 
 Principe : chaque phase laisse le projet compilable et fonctionnel.
@@ -151,13 +152,13 @@ Principe : chaque phase laisse le projet compilable et fonctionnel.
 
 - Windows x86_64 uniquement ; ioquake3 avec cgame en QVM.
 - SDK nommé pour Quake III (pas multi-jeu).
-- **Limite PVS côté client** : le client ne reçoit jamais les entités hors PVS ; l'ESP actuel ne peut pas les afficher. C'est étudié via le volet serveur.
+- **Limite PVS côté client** : le client ne reçoit jamais les entités hors PVS. Elles ne sont affichables que par la lecture de `g_entities[]`, donc uniquement en partie hébergée localement (`esp --server`).
 - RVA liés à un build précis du moteur.
 - Pas de manipulation de paquets réseau ; le projet reste intra-machine.
 
 ## 10. Dette technique connue
 
-1. ~~Logique de recherche de snapshot dupliquée~~ : factorisée (`cli/src/locate.rs`, filtres dans `sdk::plausibility`).
+1. Logique de recherche de snapshot : factorisée dans `cli/src/locate.rs` (filtres dans `sdk::plausibility`), mais la version « snapshot vivant » (test de progression du temps, recoupement avec le joueur serveur) vit encore dans `esp.rs` ; `aim-mouse`, `aimbot` et `find-viewangles` utilisent la version simple. À remonter dans `locate.rs`.
 2. RVA en dur dans `aimbot.rs`, non référencés dans `offsets.json` ; nommage incohérent (`cg.refdefViewAngles` / `cl.snap.ps.viewangles`).
 3. Tests : SDK (16) et `scanner::stride` (4) ; pas de test des commandes ni de fixture de snapshot réel.
 4. `offsets.json` : références à d'anciens binaires (`memory --bin …`).
@@ -166,6 +167,6 @@ Principe : chaque phase laisse le projet compilable et fonctionnel.
 
 ## 11. Suite envisagée
 
-**Court terme** : validation en jeu de `server-entities` ; RVA dans la configuration ; correction de la documentation.
+**Court terme** : remonter la localisation du snapshot vivant dans `locate.rs` et l'utiliser dans `aim-mouse` ; RVA dans la configuration.
 **Moyen terme** : tests sur fixtures ; `qcheat.toml`, `doctor`, `tracing` ; aimbot v2 (sélection, filtres d'équipe/vivant) ; TUI.
-**Long terme** : étude de `sv_snapshot.c` ; localisation de `g_entities[]` en listen server ; démonstration locale ; rédaction de `docs/server-reverse.md`.
+**Long terme** : étude détaillée de `sv_snapshot.c` ; exploitation de la vie et de l'équipe côté serveur.

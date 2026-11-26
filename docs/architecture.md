@@ -54,7 +54,7 @@ crates/
 └── cli/src/
     ├── main.rs           parsing clap + dispatch
     ├── util.rs           parse_hex, nom de processus par défaut
-    ├── locate.rs         [ajout] localisation du snapshot (partagée)
+    ├── locate.rs         [ajout] localisation du snapshot et de g_entities[] (partagée)
     └── cmd/              une sous-commande par fichier
         ├── find.rs, modules.rs, hp.rs
         ├── inspect.rs, scan.rs, players.rs, snapshot.rs
@@ -92,7 +92,7 @@ Conventions : erreurs typées avec `thiserror` dans les bibliothèques, `anyhow`
 5. Le snapshot complet est lu en un seul appel, puis les entités sont parcourues jusqu'à `num_entities`.
 6. L'affichage utilise `pos.trBase` comme position des joueurs.
 
-Les commandes `aimbot`, `aim-mouse`, `esp` et `find-viewangles` reprennent les étapes 2 à 4 via `locate.rs`, puis ajoutent leur logique propre.
+Les commandes `aimbot`, `aim-mouse` et `find-viewangles` reprennent les étapes 2 à 4 via `locate.rs`, puis ajoutent leur logique propre. `esp` ajoute des contrôles : rejet des `serverTime` irréalistes, choix des candidats dont le temps avance, et, avec `--server`, recoupement avec la position du joueur côté serveur (voir `ServerSide/server-reverse.md` §7).
 
 ---
 
@@ -118,11 +118,11 @@ Chaque étape indique quoi lire, quoi lancer, et ce qu'il faut pouvoir expliquer
 | 2 | `sdk/src/vector.rs`, `entitystate.rs`, `snapshot.rs` | `cargo test -p sdk` | Pourquoi `#[repr(C)]` ; ce que vérifient (et ne vérifient pas) les assertions de taille. |
 | 3 | `scanner/src/scan.rs`, `stride.rs` | `qcheat scan <adresse>` | Scan par blocs alignés ; détection d'un tableau par écart constant. |
 | 4 | `sdk/src/plausibility.rs`, `cli/src/locate.rs` | `qcheat snapshot` | Pourquoi une signature structurelle (deux candidats à 53 772 octets) remplace une adresse fixe. |
-| 5 | `docs/reverse-engineering.md` | `qcheat inspect <adresse> --mode raw` | Chemin du premier HP trouvé à la snapshot complète ; rôle de `trBase`. |
-| 6 | `docs/server-reverse.md`, `sdk/src/server.rs` | `qcheat server-entities` | Pourquoi le serveur voit plus que le client (PVS) ; comment le stride de `gentity_t` est déduit. |
+| 5 | `ClientSide/reverse-engineering.md` | `qcheat inspect <adresse> --mode raw` | Chemin du premier HP trouvé à la snapshot complète ; rôle de `trBase`. |
+| 6 | `ServerSide/server-reverse.md`, `sdk/src/server.rs` | `qcheat server-entities` | Pourquoi le serveur voit plus que le client (PVS) ; comment le stride de `gentity_t` est déduit. |
 | 7 | `cli/src/cmd/find_viewangles.rs` | `qcheat find-viewangles` | Isolation d'une variable par rondes de confirmation. |
 | 8 | `cli/src/cmd/aimbot.rs`, `aim_mouse.rs` | `qcheat aim-mouse` | Différence entre écrire dans la mémoire et passer par le chemin d'entrée du jeu ; boucle de lissage. |
-| 9 | `cli/src/cmd/esp.rs` | `qcheat esp` | Projection monde → écran ; fenêtre transparente ; extrapolation entre deux snapshots. |
+| 9 | `cli/src/cmd/esp.rs` | `qcheat esp --debug`, puis `esp --server` | Projection monde → écran (caméra = origine + `viewheight`) ; fenêtre transparente ; extrapolation entre deux snapshots ; affichage des joueurs hors PVS lus dans `g_entities[]`. |
 
 Ordre conseillé : 1 → 6 pour la compréhension du moteur et du protocole, 7 → 9 pour les modules d'interaction.
 
@@ -147,4 +147,4 @@ Le workflow `.github/workflows/ci.yml` compile et teste le workspace sous Window
 | Nommage incohérent des variables d'angle (`cg.refdefViewAngles`, `cl.snap.ps.viewangles`) | Harmoniser les noms dans le code et dans `offsets.json`. |
 | Tests limités à `sdk` et `scanner::stride` | Ajouter une fixture de snapshot capturé en jeu pour tester les parseurs hors ligne. |
 | Réglages passés par flags à chaque lancement | Fichier `qcheat.toml` (config) puis `qcheat doctor`. |
-| Hypothèses du volet serveur non encore confirmées en jeu | Voir `docs/server-reverse.md` §6. |
+| Localisation du snapshot « vivant » (progression de `serverTime`, recoupement avec le joueur serveur) écrite dans `esp.rs` seulement | La remonter dans `locate.rs` et l'utiliser dans `aim-mouse`, `aimbot` et `find-viewangles`. |

@@ -1,6 +1,6 @@
 # Reverse côté serveur — `g_entities[]` et le PVS
 
-Document de travail du volet serveur. Commande associée : `qcheat server-entities`. Statut : **code écrit et testé sur mémoire simulée ; à valider en jeu** (voir §6).
+Document de travail du volet serveur. Commandes associées : `qcheat server-entities` et `qcheat esp --server`. Statut : **validé en jeu** sur une partie hébergée localement (voir §6 et §7).
 
 ## 1. La question
 
@@ -54,9 +54,52 @@ Testé sur une partie hébergée localement (`/devmap`, plusieurs `/addbot`) :
 
 Point encore ouvert :
 
-- Alignement : le scanner générique (`scan_aligned`) lit via `from_bytes` sur un `Vec<u8>` ; correct en pratique mais non garanti par le type.
+- Alignement : le scanner générique (`scan_aligned`) lit via `from_bytes` sur un `Vec<u8>` ; correct en pratique mais non garanti par le type. La lecture de `g_entities[]` dans l'ESP utilise `pod_read_unaligned`.
 
-## 7. Questions de jury associées
+## 7. Affichage dans l'ESP (`esp --server`)
+
+L'ESP client ne dessine que les joueurs présents dans le snapshot (boîtes rouges, `#n`). Avec `--server`, il lit en plus les créneaux joueurs de `g_entities[]` (indices 0 à 63) à chaque nouveau snapshot et dessine en vert (`SV#n`) tout joueur que le serveur connaît mais que le client n'a pas reçu :
+
+1. Le tableau est localisé une fois : soit par `--sv-rva` (lecture du pointeur `sv.gentities` à `exe + RVA` et du stride à `+8`), soit par le même scan que `server-entities`.
+2. À chaque snapshot, un joueur serveur est retenu s'il est de type joueur, lié au monde (`r.linked`), vivant, différent du joueur local et **absent** du snapshot (`clientNum` non vu).
+3. La position serveur est `r.currentOrigin`. Comme pour les joueurs du snapshot, la vitesse est déduite de deux lectures successives et la position est extrapolée entre deux ticks, ce qui garde un mouvement fluide.
+4. Les deux ensembles sont indépendants : un joueur passe du vert au rouge quand il entre dans le PVS, et les boîtes rouges se comportent exactement comme sans `--server`.
+
+Lancement type, après avoir mesuré le RVA avec `server-entities` :
+
+```powershell
+.\target\release\qcheat.exe esp --fov 90 --server --sv-rva 0x1C0DB30
+```
+
+L'option `--debug` affiche chaque seconde le snapshot utilisé, le nombre de joueurs vus par le client et par le serveur, le nombre de joueurs cachés et le nombre de boîtes dessinées.
+
+### Localisation fiable du snapshot
+
+Le premier essai affichait des boîtes aux mauvais endroits, voire aucune. Trois causes ont été identifiées avec `--debug` :
+
+- **Faux positifs du filtre.** Des blocs de mémoire quelconques passent un filtre par plages. Des valeurs de `serverTime` comme `1082130432` sont en réalité le flottant `4.0` lu comme entier. L'ESP rejette désormais tout `serverTime` supérieur à 500 000 000 ms.
+- **Copies figées.** Plusieurs structures valides en apparence ne changent jamais (restes de chargement de carte). L'ESP attend 200 ms et ne garde que les candidats dont `serverTime` avance ; si le temps se fige 1,5 s, il relance la recherche.
+- **Données serveur prises pour un snapshot.** Un candidat vivant se trouvait à 8 octets du début de `g_entities[]` : le champ `trTime` de l'entité de l'hôte ressemble à un `serverTime` qui avance. Les candidats situés dans la plage de `g_entities[]` sont exclus.
+
+Le test décisif utilise le serveur comme étalon : le bon snapshot est celui dont `ps.origin` est à moins de 150 unités de `r.currentOrigin` de l'entité serveur portant son `ps.clientNum`. Si aucun candidat vivant n'existe dans la fenêtre par défaut, un scan élargi (`0x1000000` à `0x40000000`) est lancé une fois.
+
+### Alignement des boîtes
+
+Deux décalages de hauteur s'additionnaient :
+
+- `ps.origin` est le centre du joueur, pas la caméra. L'œil est à `viewheight` unités au-dessus (26 debout, 12 accroupi).
+- `trBase` / `currentOrigin` est le centre de la boîte de collision : debout, elle va de −24 (pieds) à +32 (sommet de la tête) autour de l'origine.
+
+La projection part donc de `origin + viewheight` et dessine la boîte de `origin − 24` à `origin + 32`.
+
+## 8. Limites
+
+- Le volet serveur ne fonctionne qu'en partie hébergée localement : contre un serveur distant, `g_entities[]` n'est pas dans la mémoire du processus.
+- Le RVA de `sv.gentities` est propre à un build d'ioquake3 ; le re-mesurer avec `server-entities` après une mise à jour.
+- Un joueur n'apparaît en vert que s'il est dans le champ de vision de la caméra : la boîte est une projection, pas un indicateur directionnel.
+- La localisation du snapshot « vivant » est pour l'instant écrite dans `esp.rs` ; `aim-mouse`, `aimbot` et `find-viewangles` utilisent encore la version simple de `locate.rs`. À factoriser.
+
+## 9. Questions de jury associées
 
 **Pourquoi le serveur est-il lisible alors que le client ne l'est pas ?** Parce qu'en listen server les deux tournent dans le même processus ; contre un serveur distant, `g_entities` n'existe pas dans la mémoire locale.
 

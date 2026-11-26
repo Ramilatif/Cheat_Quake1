@@ -27,4 +27,6 @@ modules.txt
 #.idea/
 /screenshot
 
+# Editor backups / undo files
 *.un~
+*~
