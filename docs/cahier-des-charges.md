@@ -59,7 +59,7 @@ Ces modules ont été développés au-delà du plan initial (qui ne prévoyait n
 **Écarts assumés par rapport à la version précédente du cahier :**
 - L'overlay graphique n'est plus exclu du périmètre (il existe).
 - Le projet n'est plus en lecture seule : il écrit en mémoire (`aimbot`) et injecte des entrées (`aim-mouse`).
-- La « localisation de `clientActive_t cl` par recoupement A == B » n'est **pas retrouvée** dans le code du dépôt. Ce qui existe est `find-viewangles` et des RVA moteur relevés avec Cheat Engine. Ce point doit être soit livré, soit retiré des revendications.
+- La « localisation de `clientActive_t cl` par recoupement A == B » est **retirée du périmètre** : elle n'a jamais été implémentée, et rien n'en dépend. L'aimbot par écriture mémoire (`aimbot`) qui l'aurait utilisée est une impasse documentée (le moteur recalcule l'angle à chaque frame) ; `aim-mouse` et `menu` passent par `SendInput`. Ce qui existe est `find-viewangles` et trois RVA moteur relevés avec Cheat Engine, consignés dans `offsets.json`.
 
 ### 3.3 Fonctionnalités planifiées
 
@@ -128,7 +128,7 @@ La crate `config` (chargement de `qcheat.toml`, fusion avec les flags CLI, ne co
 | 3 | Localisation de `cg.activeSnapshots` par signature | Terminé, validé en jeu |
 | 4 | Refactor en 4 crates | Terminé |
 | 5 | CLI unifiée `qcheat` | Terminé |
-| 6 | Localisation de la variable d'angle de rendu (`find-viewangles`, RVA relevés) | Partiel — localisation de `cl` non retrouvée dans le code |
+| 6 | Localisation de la variable d'angle de rendu (`find-viewangles`, RVA relevés) | Terminé — localisation de `cl` retirée du périmètre (RVA relevés à la place) |
 | 7 | Aimbot v1 (`aimbot` mémoire, `aim-mouse` entrée) | Fonctionnel côté `aim-mouse`, expérimental côté `aimbot` |
 | 7bis | ESP overlay | Livré, validé en jeu |
 | 8 | Factorisation du locator (fait) ; RVA en configuration (à faire) | En cours |
