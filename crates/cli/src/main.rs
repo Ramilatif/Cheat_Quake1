@@ -24,6 +24,8 @@ enum Cmd {
     Aimbot(cmd::aimbot::Args),
     /// Aim assistance via synthetic mouse input (SendInput).
     AimMouse(cmd::aim_mouse::Args),
+    /// Check the environment: process, memory access, window, snapshot, input.
+    Doctor(cmd::doctor::Args),
     /// Wallhack overlay — draws boxes over enemies through walls.
     Esp(cmd::esp::Args),
     /// Locate the target process and report its PID + module base.
@@ -36,6 +38,8 @@ enum Cmd {
     Hp(cmd::hp::Args),
     /// Pretty-print an arbitrary address as an entityState_t.
     Inspect(cmd::inspect::Args),
+    /// Unified aimbot + wallhack with an in-game settings menu (F1).
+    Menu(cmd::menu::Args),
     /// Scan a memory window for entityState_t-shaped bytes.
     Scan(cmd::scan::Args),
     /// Heap-wide scan for live player entities.
@@ -50,12 +54,14 @@ fn main() -> Result<()> {
     match Cli::parse().command {
         Cmd::Aimbot(a) => cmd::aimbot::run(a),
         Cmd::AimMouse(a) => cmd::aim_mouse::run(a),
+        Cmd::Doctor(a) => cmd::doctor::run(a),
         Cmd::Esp(a) => cmd::esp::run(a),
         Cmd::Find(a) => cmd::find::run(a),
         Cmd::FindViewangles(a) => cmd::find_viewangles::run(a),
         Cmd::Modules(a) => cmd::modules::run(a),
         Cmd::Hp(a) => cmd::hp::run(a),
         Cmd::Inspect(a) => cmd::inspect::run(a),
+        Cmd::Menu(a) => cmd::menu::run(a),
         Cmd::Scan(a) => cmd::scan::run(a),
         Cmd::Players(a) => cmd::players::run(a),
         Cmd::Snapshot(a) => cmd::snapshot::run(a),

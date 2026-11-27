@@ -46,7 +46,7 @@
   "runtime_addresses": {
     "_comment": "Heap-resident structures. Addresses change per run; recover via signature scan. Documented here for reference, not as constants.",
     "cg_activeSnapshots": {
-      "scanner": "memory --bin dump-snapshot",
+      "scanner": "qcheat snapshot",
       "signature": "Two SnapshotHeader candidates separated by exactly sizeof(snapshot_t) = 53772 bytes.",
       "observed_window": "0x0000000005000000..0x0000000009000000",
       "session_example_2026_06_02": [
@@ -55,7 +55,7 @@
       ]
     },
     "parseEntities_buffer": {
-      "scanner": "memory --bin scan-entities",
+      "scanner": "qcheat scan",
       "signature": "208-byte stride contiguous block, ~1.6 MiB (8192 entityState_t entries).",
       "note": "Lives inside cg.activeSnapshots[N].entities[] — not the engine's cl.parseEntities[] (which would be in the .exe .bss)."
     }

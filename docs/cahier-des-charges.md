@@ -53,6 +53,8 @@ Ces modules ont été développés au-delà du plan initial (qui ne prévoyait n
 | Aimbot par entrée souris | `aim-mouse` | Calcule l'erreur angulaire, envoie des déplacements relatifs via `SendInput`, avec lissage, plafond par tick, bascule par touche, prédiction de cible. | Fonctionnel, nécessite de régler `sensitivity`, `m_yaw`, `m_pitch`. |
 | ESP / overlay | `esp` | Fenêtre transparente superposée dessinant des boîtes sur les joueurs du snapshot (rouge), avec extrapolation entre snapshots. | Fonctionnel, validé en jeu. |
 | ESP volet serveur | `esp --server` | Ajoute, en vert, les joueurs connus de `g_entities[]` mais absents du snapshot (filtrés par le PVS). Localisation du snapshot vivant validée par la position du joueur côté serveur. | Fonctionnel en partie hébergée localement, validé en jeu. |
+| Menu unifié | `menu` | Aimbot + ESP dans une seule boucle (un snapshot partagé), menu de réglages en jeu au clavier (F1), sélection de cible (plus proche / plus petit angle), réglages issus de `qcheat.toml`. | Fonctionnel. |
+| Diagnostic | `doctor` | Contrôle de l'environnement : processus, accès mémoire, fenêtre, snapshot vivant, entrée souris synthétique, `qcheat.toml`. | Livré. |
 
 **Écarts assumés par rapport à la version précédente du cahier :**
 - L'overlay graphique n'est plus exclu du périmètre (il existe).
@@ -62,8 +64,8 @@ Ces modules ont été développés au-delà du plan initial (qui ne prévoyait n
 ### 3.3 Fonctionnalités planifiées
 
 - **Exploitation des données serveur** : joueurs hors PVS affichés dans l'ESP (fait) ; vie et équipe dans l'ESP et choix de cible côté aim (à faire).
-- **Aimbot v2** : sélection de cible configurable (angle minimal, HP le plus faible), filtre d'équipe et de vivant, filtre de portée. *Les aspects de « discrétion » de l'ancienne version sont abandonnés : le projet étudie le contrôle et le protocole, pas l'évitement de détection.*
-- **UX** : `qcheat.toml`, `qcheat doctor`, mode TUI, logging structuré (`tracing`).
+- **Aimbot v2** : sélection de cible configurable. *Fait* : plus proche, angle minimal (`menu`). *À faire* : HP le plus faible, filtre d'équipe, filtre de portée. *Les aspects de « discrétion » de l'ancienne version sont abandonnés : le projet étudie le contrôle et le protocole, pas l'évitement de détection.*
+- **UX** : `qcheat.toml` et `qcheat doctor` : *faits*. Mode TUI et logging structuré (`tracing`) : *retirés du périmètre*.
 - **Tests sur fixtures** : snapshot binaire capturé, rejoué hors-ligne pour tester le SDK et les parseurs en CI.
 - **Volet serveur** : localisation de `g_entities[]`, démonstration du PVS (`server-entities`) et affichage dans l'ESP (`esp --server`) : faits et validés en jeu. Reste : lecture détaillée de `sv_snapshot.c`, branchement de l'aim sur la localisation fiable du snapshot.
 
@@ -78,12 +80,12 @@ Les tests s'effectuent exclusivement en local (`/devmap` + `/addbot`), sur la ma
 
 ## 5. Architecture technique
 
-Workspace Cargo, quatre crates. Le graphe réel des dépendances est :
+Workspace Cargo, cinq crates (`sdk`, `process`, `scanner`, `config`, `cli`). Le graphe réel des dépendances est :
 
 ```
             cli (qcheat)
           /    |     \
-      sdk   scanner   process
+      sdk   scanner   process   config
                 \       ^
                  +------+
 ```
@@ -93,13 +95,14 @@ Workspace Cargo, quatre crates. Le graphe réel des dépendances est :
 | `sdk` | Miroirs `repr(C)` avec asserts de taille/offset ; sans dépendance Windows ni I/O. | `bytemuck` |
 | `process` | `ProcessHandle` (lecture et écriture), Toolhelp32. Ne connaît pas le jeu. | `windows`, `thiserror` |
 | `scanner` | Primitives de scan génériques (`scan_aligned`, `detect_repeating_stride`). Ne connaît pas le jeu. | `process` |
+| `config` | Chargement de `qcheat.toml`, fusion avec les flags CLI (les flags l'emportent). | `serde`, `toml` |
 | `cli` | Binaire `qcheat`, une sous-commande par opération. Seule crate qui connaît le jeu **et** l'API Windows. | toutes |
 
 **Garanties dans le code :** asserts de taille/offset sur toutes les structures miroir ; `#![warn(missing_docs)]` sur les trois bibliothèques ; erreurs via `thiserror` (libs) et `anyhow` (CLI).
 
 **Précision importante :** les `const assert!` vérifient la cohérence du miroir Rust avec les valeurs de référence écrites en dur ; ils ne comparent rien au binaire cible. La validation à l'exécution repose sur le filtre de plausibilité et le recoupement des deux snapshots espacés de 53 772 octets.
 
-**Extension prévue :** crates `config` et `tui`.
+La crate `config` (chargement de `qcheat.toml`, fusion avec les flags CLI, ne connaît que TOML et des nombres) a été ajoutée ; la crate `tui` est abandonnée.
 
 ## 6. Livrables
 
@@ -113,7 +116,8 @@ Workspace Cargo, quatre crates. Le graphe réel des dépendances est :
 | `docs/comprendre-le-projet.md` | Présent (explications, glossaire) |
 | `ServerSide/server-reverse.md` | Présent (méthode, layout vérifié, mesures en jeu, ESP serveur) |
 | `docs/architecture.md` | Présent |
-| `qcheat.example.toml` | À produire (avec la couche config) |
+| `qcheat.example.toml` | Présent |
+| `docs/reference-code.md` | Présent (référence module par module) |
 
 ## 7. Méthodologie et état d'avancement
 
@@ -128,8 +132,8 @@ Workspace Cargo, quatre crates. Le graphe réel des dépendances est :
 | 7 | Aimbot v1 (`aimbot` mémoire, `aim-mouse` entrée) | Fonctionnel côté `aim-mouse`, expérimental côté `aimbot` |
 | 7bis | ESP overlay | Livré, validé en jeu |
 | 8 | Factorisation du locator (fait) ; RVA en configuration (à faire) | En cours |
-| 9 | Aimbot v2 (sélection configurable, filtres) | Planifié |
-| 10 | UX (`qcheat.toml`, `doctor`, TUI, `tracing`) | Planifié |
+| 9 | Aimbot v2 (sélection configurable, filtres) | Partiel — sélection de cible faite ; filtres équipe/portée à faire |
+| 10 | UX (`qcheat.toml`, `doctor`, menu en jeu) | Terminé — TUI et `tracing` retirés du périmètre |
 | 11 | Tests sur fixtures | Planifié |
 | 12 | Volet serveur (`g_entities[]`, comparaison PVS, ESP serveur) | Terminé, validé en jeu |
 | 13 | Documentation finale | En cours |
@@ -160,7 +164,7 @@ Principe : chaque phase laisse le projet compilable et fonctionnel.
 
 1. Logique de recherche de snapshot : factorisée dans `cli/src/locate.rs` (filtres dans `sdk::plausibility`), mais la version « snapshot vivant » (test de progression du temps, recoupement avec le joueur serveur) vit encore dans `esp.rs` ; `aim-mouse`, `aimbot` et `find-viewangles` utilisent la version simple. À remonter dans `locate.rs`.
 2. RVA en dur dans `aimbot.rs`, non référencés dans `offsets.json` ; nommage incohérent (`cg.refdefViewAngles` / `cl.snap.ps.viewangles`).
-3. Tests : SDK (16) et `scanner::stride` (4) ; pas de test des commandes ni de fixture de snapshot réel.
+3. Tests : SDK (16), `scanner::stride` (4) et `config` (4) ; pas de test des commandes ni de fixture de snapshot réel.
 4. `offsets.json` : références à d'anciens binaires (`memory --bin …`).
 5. `README` et tables de commandes à maintenir en phase avec `main.rs`.
 6. Licence : projet MIT reprenant des layouts de headers GPL-2.0 ; clarifier (note explicite ou passage en GPL-2.0).

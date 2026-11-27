@@ -166,7 +166,7 @@ pub fn run(args: Args) -> Result<()> {
                 target.client_num, dist, angles.1, angles.0
             );
         } else {
-            let players = entity_types.iter().filter(|&&t| t == EntityType::PLAYER as i32).count();
+            let _players = entity_types.iter().filter(|&&t| t == EntityType::PLAYER as i32).count();
             println!("No players found ({} entities): types={:?}", snap.header.num_entities, entity_types);
         }
 

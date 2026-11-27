@@ -10,6 +10,7 @@ description = "qcheat: command-line entry point for the Cheat_Quake1 toolkit"
 anyhow.workspace = true
 bytemuck.workspace = true
 clap.workspace = true
+config = { path = "../config" }
 process = { path = "../process" }
 scanner = { path = "../scanner" }
 sdk = { path = "../sdk" }

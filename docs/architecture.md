@@ -13,6 +13,7 @@ Ce document décrit l'organisation du dépôt, le chemin d'une commande de bout 
                           │
  ┌────────────────────────┴───────────────────────────┐
  │ process   : accès au processus (handle, modules)   │
+ │ config    : qcheat.toml + fusion avec les flags    │
  │ scanner   : primitives de scan génériques          │
  │ sdk       : structures du jeu + logique pure       │
  │ cli       : commandes qcheat (assemble le tout)    │
@@ -26,9 +27,12 @@ Principe directeur : chaque couche ne connaît que ce dont elle a besoin.
 | `sdk` | Oui (structures, constantes) | Non | Oui |
 | `process` | Non | Oui | Non |
 | `scanner` | Non | Via `process` | Non |
+| `config` | Non | Non | Oui |
 | `cli` | Oui | Oui | Non |
 
 Conséquence pratique : toute logique qui peut être exprimée sur des structures déjà lues (filtres de plausibilité, correspondance serveur/client, inférence du stride) est placée dans `sdk`, où elle est vérifiée par des tests unitaires.
+
+Pour le détail de chaque module (mécanismes transversaux, projection 3D → 2D, overlay, choix de conception), voir [reference-code.md](reference-code.md).
 
 ---
 
@@ -45,6 +49,8 @@ crates/
 │   ├── constants.rs      MAX_CLIENTS, MAX_GENTITIES, …
 │   ├── server.rs         [ajout] SharedEntity (tête de gentity_t), jumeau serveur, stride
 │   └── plausibility.rs   [ajout] filtres de snapshot (Loose / Strict)
+├── config/src/
+│   └── lib.rs            chargement de qcheat.toml, fusion avec les flags CLI
 ├── process/src/
 │   ├── discovery.rs      find_by_name, list_modules (Toolhelp32)
 │   └── handle.rs         ProcessHandle : read, read_into, write
@@ -60,6 +66,8 @@ crates/
         ├── inspect.rs, scan.rs, players.rs, snapshot.rs
         ├── find_viewangles.rs, aimbot.rs, aim_mouse.rs
         ├── esp.rs
+        ├── menu.rs              [ajout] aimbot + wallhack + menu en jeu
+        ├── doctor.rs            [ajout] diagnostic de l'environnement
         └── server_entities.rs   [ajout] volet serveur
 ```
 
@@ -132,7 +140,7 @@ Ordre conseillé : 1 → 6 pour la compréhension du moteur et du protocole, 7 �
 
 ```powershell
 cargo build --release       # target\release\qcheat.exe
-cargo test --workspace      # tests de sdk et de scanner
+cargo test --workspace      # tests de sdk, scanner et config
 ```
 
 Le workflow `.github/workflows/ci.yml` compile et teste le workspace sous Windows à chaque push et pull request. Les tests de `sdk` s'exécutent aussi sous Linux ; `process`, `scanner` et `cli` nécessitent Windows.
@@ -146,5 +154,4 @@ Le workflow `.github/workflows/ci.yml` compile et teste le workspace sous Window
 | RVA en dur dans `cmd/aimbot.rs` (`0x7B409C`, `0x7B4098`, `0x7B9988`) | Les déplacer dans `offsets.json` ou une configuration, avec le build d'ioquake3 associé. |
 | Nommage incohérent des variables d'angle (`cg.refdefViewAngles`, `cl.snap.ps.viewangles`) | Harmoniser les noms dans le code et dans `offsets.json`. |
 | Tests limités à `sdk` et `scanner::stride` | Ajouter une fixture de snapshot capturé en jeu pour tester les parseurs hors ligne. |
-| Réglages passés par flags à chaque lancement | Fichier `qcheat.toml` (config) puis `qcheat doctor`. |
 | Localisation du snapshot « vivant » (progression de `serverTime`, recoupement avec le joueur serveur) écrite dans `esp.rs` seulement | La remonter dans `locate.rs` et l'utiliser dans `aim-mouse`, `aimbot` et `find-viewangles`. |

@@ -36,6 +36,8 @@ The project is a hands-on study of memory reverse-engineering: mirroring C struc
 | Server | Read the server's authoritative entity array and compare it with the client's view | `server-entities` |
 | Aim | Locate the view-angle variable; steer the camera by memory write or by mouse input | `find-viewangles`, `aimbot`, `aim-mouse` |
 | Overlay | Draw boxes over the players of the current snapshot; with `--server`, also over players the server filtered out of the client's view | `esp` |
+| Unified cheat | Aimbot + wallhack in one loop with a keyboard-driven in-game settings menu; settings from `qcheat.toml` | `menu` |
+| Diagnostics | Check the whole environment (process, memory access, window, snapshot, input, config) | `doctor` |
 
 All features ship in a single executable, `qcheat`, with one self-documented subcommand per operation.
 
@@ -132,6 +134,15 @@ Measured on the tested build: `sizeof(gentity_t)` = 804 bytes, `sv.gentities` at
 
 Set `--fov` to the game's `cg_fov` (horizontal). The camera is `ps.origin + viewheight`; boxes span `origin − 24` to `origin + 32`.
 
+### Unified menu and diagnostics
+
+| Command | Purpose |
+|---|---|
+| `menu` | **Main entry point.** Aimbot and wallhack share one snapshot read and one polling loop, with an in-game settings menu (`F1` by default, keyboard-navigated because the game captures the mouse). Target selection (closest / smallest angle), sensitivity, smoothing, FOV and hotkeys come from [`qcheat.toml`](qcheat.example.toml); CLI flags override the file. A stalled `serverTime` triggers a rescan of the snapshot instead of a blind timer. |
+| `doctor` | Environment diagnostic: process found, memory read/write access, game window locatable, a live snapshot present, synthetic mouse input accepted, `qcheat.toml` valid. Run it first after an ioquake3 update. |
+
+Copy [`qcheat.example.toml`](qcheat.example.toml) to `qcheat.toml` (current directory, or `--config <path>`) to set defaults.
+
 ---
 
 ## How it works
@@ -156,6 +167,7 @@ Set `--fov` to the game's `cg_fov` (horizontal). The camera is `ps.origin + view
 Cheat_Quake1/
 ├── Cargo.toml                 workspace definition and shared dependencies
 ├── offsets.json               struct sizes, field offsets, engine RVAs
+├── qcheat.example.toml        sample configuration for `menu`
 ├── README.md
 ├── LICENSE
 ├── .github/workflows/ci.yml   Windows build + tests
@@ -176,6 +188,7 @@ Cheat_Quake1/
     │   └── src/  discovery (Toolhelp32), handle (Read/WriteProcessMemory)
     ├── scanner/               generic memory-scan primitives
     │   └── src/  scan (aligned scan), stride (array detection)
+    ├── config/                `qcheat.toml` loading and merge with CLI flags
     └── cli/                   the `qcheat` binary
         └── src/
             ├── main.rs        argument parsing and dispatch
@@ -183,14 +196,14 @@ Cheat_Quake1/
             ├── locate.rs      shared snapshot and g_entities[] locators
             └── cmd/           one file per subcommand
                 find, modules, hp, inspect, scan, players, snapshot,
-                find_viewangles, aimbot, aim_mouse, esp, server_entities
+                find_viewangles, aimbot, aim_mouse, esp, server_entities, menu, doctor
 ```
 
 ---
 
 ## Architecture
 
-Four crates with one-way dependencies.
+Five crates with one-way dependencies; `config` sits beside `sdk` and only knows TOML and plain numbers.
 
 ```
             cli (qcheat)
@@ -205,6 +218,7 @@ Four crates with one-way dependencies.
 | `sdk` | `#[repr(C)]` mirrors with layout assertions; sanity filters; server-side pure logic (server twin matching, stride inference). No Windows API, no I/O. | `bytemuck` |
 | `process` | `ProcessHandle` (read and write) and process/module discovery. Knows nothing about Quake. | `windows`, `thiserror` |
 | `scanner` | Chunked aligned scan with a caller-supplied predicate; stride detection. Knows nothing about Quake. | `process` |
+| `config` | Loads `qcheat.toml` and merges it with CLI flags (flags win). | `serde`, `toml` |
 | `cli` | The only crate that combines game knowledge and the Windows API (SendInput, GDI). | all |
 
 Rules:
@@ -214,7 +228,7 @@ Rules:
 - Libraries return typed errors (`thiserror`); the CLI uses `anyhow`.
 - Public items in libraries are documented (`#![warn(missing_docs)]`).
 
-Details and a step-by-step reading order: [`docs/architecture.md`](docs/architecture.md).
+Details and a step-by-step reading order: [`docs/architecture.md`](docs/architecture.md); per-module reference: [`docs/reference-code.md`](docs/reference-code.md).
 
 ---
 
@@ -224,7 +238,7 @@ Details and a step-by-step reading order: [`docs/architecture.md`](docs/architec
 cargo test --workspace
 ```
 
-Covered today: `sdk` (snapshot filters, server twin matching, stride inference; layout assertions run at compile time) and `scanner::stride`. Commands that need a live game are checked manually against a running ioquake3; the continuous-integration workflow builds and tests the workspace on Windows.
+Covered today: `sdk` (snapshot filters, server twin matching, stride inference; layout assertions run at compile time), `scanner::stride` and `config`. Commands that need a live game are checked manually against a running ioquake3; the continuous-integration workflow builds and tests the workspace on Windows.
 
 ---
 
@@ -235,7 +249,7 @@ Covered today: `sdk` (snapshot filters, server twin matching, stride inference; 
 - Several engine RVAs are tied to one ioquake3 build (`sv.gentities` in `offsets.json`; others hard-coded in `aimbot.rs` and not yet listed there).
 - The live-snapshot locator (time progression, server cross-check) is implemented in `esp.rs` only. `aim-mouse`, `aimbot` and `find-viewangles` still use the simple locator in `locate.rs`; moving the improved one into `locate.rs` is the next planned refactor.
 - `aimbot` (memory write) is partly ineffective because some target addresses are copies; `aim-mouse` is the reliable path. `aim-mouse` aims from the entity origin rather than the eye, targets the closest player without a visibility test, and has not been validated in game yet.
-- No configuration file, interactive UI, or structured logging yet.
+- No terminal UI or structured logging (`tracing`); configuration is limited to `qcheat.toml`.
 
 ---
 
@@ -247,17 +261,11 @@ All files below are in French.
 |---|---|
 | [`docs/cahier-des-charges.md`](docs/cahier-des-charges.md) | Project specification, phases, status |
 | [`docs/architecture.md`](docs/architecture.md) | Architecture plan, data flow, how to add a command, study path |
+| [`docs/reference-code.md`](docs/reference-code.md) | Module-by-module code reference: crates, subcommands, cross-cutting mechanisms |
 | [`docs/comprendre-le-projet.md`](docs/comprendre-le-projet.md) | Concepts, glossary, typical questions |
 | [`ClientSide/reverse-engineering.md`](ClientSide/reverse-engineering.md) | Client-side study: from the first HP value to the full snapshot |
 | [`ServerSide/README.md`](ServerSide/README.md) | Server-side index: commands, source files, measured values |
 | [`ServerSide/server-reverse.md`](ServerSide/server-reverse.md) | Server-side study: `g_entities[]`, PVS, in-game measurements |
-
----|---|
-| [`docs/cahier-des-charges.md`](docs/cahier-des-charges.md) | Project specification, phases, status |
-| [`docs/architecture.md`](docs/architecture.md) | Structure, data flow, how to add a command, study path |
-| [`ClientSide/reverse-engineering.md`](ClientSide/reverse-engineering.md) | Client-side walkthrough: from the first HP value to the full snapshot |
-| [`docs/comprendre-le-projet.md`](docs/comprendre-le-projet.md) | Concepts, glossary, typical questions |
-| [`ServerSide/server-reverse.md`](ServerSide/server-reverse.md) | Server-side study: `g_entities[]`, PVS, in-game measurements, server-side ESP |
 
 ---
 
@@ -315,6 +323,8 @@ Le projet est une étude pratique du reverse-engineering mémoire : recopier des
 | Serveur | Lire le tableau d'entités du serveur et le comparer à la vue du client | `server-entities` |
 | Visée | Localiser la variable d'angle de vue ; piloter la caméra par écriture mémoire ou par entrée souris | `find-viewangles`, `aimbot`, `aim-mouse` |
 | Overlay | Dessiner des boîtes sur les joueurs du snapshot courant ; avec `--server`, aussi sur ceux que le serveur a filtrés de la vue du client | `esp` |
+| Cheat unifié | Aimbot + wallhack dans une seule boucle, avec un menu de réglages en jeu au clavier ; réglages lus dans `qcheat.toml` | `menu` |
+| Diagnostic | Vérifier tout l'environnement (processus, accès mémoire, fenêtre, snapshot, entrée, config) | `doctor` |
 
 Toutes les fonctionnalités sont regroupées dans un seul exécutable, `qcheat`, avec une sous-commande documentée par opération.
 
@@ -411,6 +421,15 @@ Valeurs par défaut de `aim-mouse` : `--sensitivity 5.0 --m-yaw 0.022 --m-pitch 
 
 Régler `--fov` sur le `cg_fov` du jeu (horizontal). La caméra est `ps.origin + viewheight` ; les boîtes vont de `origin − 24` à `origin + 32`.
 
+### Menu unifié et diagnostic
+
+| Commande | Rôle |
+|---|---|
+| `menu` | **Point d'entrée principal.** L'aimbot et le wallhack partagent une lecture de snapshot et une boucle, avec un menu de réglages en jeu (`F1` par défaut, au clavier car le jeu capture la souris). Mode de sélection de cible (plus proche / plus petit angle), sensibilité, lissage, FOV et touches viennent de [`qcheat.toml`](qcheat.example.toml) ; les options de la CLI l'emportent sur le fichier. Un `serverTime` figé déclenche un nouveau scan du snapshot, plutôt qu'une minuterie aveugle. |
+| `doctor` | Diagnostic de l'environnement : processus trouvé, accès mémoire en lecture/écriture, fenêtre du jeu localisable, snapshot vivant présent, entrée souris synthétique acceptée, `qcheat.toml` valide. À lancer en premier après une mise à jour d'ioquake3. |
+
+Copier [`qcheat.example.toml`](qcheat.example.toml) en `qcheat.toml` (dossier courant, ou `--config <chemin>`) pour fixer les valeurs par défaut.
+
 ---
 
 ## Fonctionnement
@@ -435,6 +454,7 @@ Régler `--fov` sur le `cg_fov` du jeu (horizontal). La caméra est `ps.origin +
 Cheat_Quake1/
 ├── Cargo.toml                 définition du workspace et dépendances communes
 ├── offsets.json               tailles de structures, offsets de champs, RVA du moteur
+├── qcheat.example.toml        exemple de configuration pour `menu`
 ├── README.md
 ├── LICENSE
 ├── .github/workflows/ci.yml   build + tests sous Windows
@@ -451,6 +471,7 @@ Cheat_Quake1/
     ├── sdk/                   miroirs de structures, constantes, logique pure
     ├── process/               accès aux processus Windows
     ├── scanner/               primitives génériques de scan mémoire
+    ├── config/                chargement de `qcheat.toml` et fusion avec les options CLI
     └── cli/                   le binaire `qcheat`
         └── src/
             ├── main.rs        arguments et dispatch
@@ -463,7 +484,7 @@ Cheat_Quake1/
 
 ## Architecture
 
-Quatre crates avec des dépendances à sens unique : `cli` dépend de `sdk`, `scanner` et `process` ; `scanner` dépend de `process` ; `sdk` ne dépend d'aucune autre crate du projet et ne connaît ni Windows ni les E/S.
+Cinq crates avec des dépendances à sens unique : `cli` dépend de `sdk`, `scanner`, `process` et `config` (qui ne connaît que TOML et des nombres) ; `scanner` dépend de `process` ; `sdk` ne dépend d'aucune autre crate du projet et ne connaît ni Windows ni les E/S.
 
 Règles :
 
@@ -472,7 +493,7 @@ Règles :
 - Les bibliothèques renvoient des erreurs typées (`thiserror`) ; le CLI utilise `anyhow`.
 - Les éléments publics des bibliothèques sont documentés (`#![warn(missing_docs)]`).
 
-Détails et ordre de lecture pas à pas : [`docs/architecture.md`](docs/architecture.md).
+Détails et ordre de lecture pas à pas : [`docs/architecture.md`](docs/architecture.md) ; référence module par module : [`docs/reference-code.md`](docs/reference-code.md).
 
 ---
 
@@ -482,7 +503,7 @@ Détails et ordre de lecture pas à pas : [`docs/architecture.md`](docs/architec
 cargo test --workspace
 ```
 
-Couvert aujourd'hui : `sdk` (filtres de snapshot, correspondance du jumeau serveur, déduction du stride ; les assertions de layout s'exécutent à la compilation) et `scanner::stride`. Les commandes qui exigent un jeu en cours sont vérifiées manuellement sur ioquake3 ; le workflow d'intégration continue compile et teste le workspace sous Windows.
+Couvert aujourd'hui : `sdk` (filtres de snapshot, correspondance du jumeau serveur, déduction du stride ; les assertions de layout s'exécutent à la compilation), `scanner::stride` et `config`. Les commandes qui exigent un jeu en cours sont vérifiées manuellement sur ioquake3 ; le workflow d'intégration continue compile et teste le workspace sous Windows.
 
 ---
 
@@ -493,7 +514,7 @@ Couvert aujourd'hui : `sdk` (filtres de snapshot, correspondance du jumeau serve
 - Plusieurs RVA du moteur sont liés à un build d'ioquake3 (`sv.gentities` dans `offsets.json` ; les autres sont en dur dans `aimbot.rs` et pas encore listés).
 - La localisation du snapshot vivant (progression du temps, recoupement avec le serveur) n'existe que dans `esp.rs`. `aim-mouse`, `aimbot` et `find-viewangles` utilisent encore la version simple de `locate.rs` ; la remonter dans `locate.rs` est le prochain refactor prévu.
 - `aimbot` (écriture mémoire) est en partie inefficace car certaines adresses visées sont des copies ; `aim-mouse` est la voie fiable. `aim-mouse` vise depuis l'origine de l'entité et non depuis l'œil, cible le joueur le plus proche sans test de visibilité, et n'a pas encore été validé en jeu.
-- Pas de fichier de configuration, d'interface interactive ni de journalisation structurée pour l'instant.
+- Pas d'interface terminal ni de journalisation structurée (`tracing`) ; la configuration se limite à `qcheat.toml`.
 
 ---
 
@@ -505,17 +526,11 @@ Tous les fichiers ci-dessous sont en français.
 |---|---|
 | [`docs/cahier-des-charges.md`](docs/cahier-des-charges.md) | Spécification du projet, phases, état |
 | [`docs/architecture.md`](docs/architecture.md) | Plan d'architecture, flux de données, ajout d'une commande, parcours d'étude |
+| [`docs/reference-code.md`](docs/reference-code.md) | Référence du code module par module : crates, sous-commandes, mécanismes transversaux |
 | [`docs/comprendre-le-projet.md`](docs/comprendre-le-projet.md) | Concepts, glossaire, questions types |
 | [`ClientSide/reverse-engineering.md`](ClientSide/reverse-engineering.md) | Étude côté client : de la première valeur de HP au snapshot complet |
 | [`ServerSide/README.md`](ServerSide/README.md) | Index côté serveur : commandes, fichiers sources, valeurs mesurées |
 | [`ServerSide/server-reverse.md`](ServerSide/server-reverse.md) | Étude côté serveur : `g_entities[]`, PVS, mesures en jeu |
-
----|---|
-| [`docs/cahier-des-charges.md`](docs/cahier-des-charges.md) | Spécification du projet, phases, état |
-| [`docs/architecture.md`](docs/architecture.md) | Structure, flux de données, ajout d'une commande, parcours d'étude |
-| [`ClientSide/reverse-engineering.md`](ClientSide/reverse-engineering.md) | Parcours côté client : de la première valeur de HP au snapshot complet |
-| [`docs/comprendre-le-projet.md`](docs/comprendre-le-projet.md) | Concepts, glossaire, questions types |
-| [`ServerSide/server-reverse.md`](ServerSide/server-reverse.md) | Étude côté serveur : `g_entities[]`, PVS, mesures en jeu, ESP côté serveur |
 
 ---
 
