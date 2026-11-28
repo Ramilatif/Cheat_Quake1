@@ -323,7 +323,12 @@ pub fn run(args: Args) -> Result<()> {
     // it's been frozen this long it's worth paying for a fresh scan.
     let mut last_change_wall = Instant::now();
     let mut last_seen_server_time = i32::MIN;
-    const STALL_RESCAN_AFTER: Duration = Duration::from_secs(3);
+    let mut stall_rescan_after = Duration::from_secs(3);
+    const MAX_STALL_BACKOFF: Duration = Duration::from_secs(30);
+    // Minimum time between two full memory scans, whatever the reason.
+    const MIN_SCAN_GAP: Duration = Duration::from_millis(500);
+    let mut last_scan = Instant::now() - MIN_SCAN_GAP;
+    let started = Instant::now();
     let mut tracks: HashMap<i32, Track> = HashMap::new();
     let mut own_yaw: Option<f32> = None;
     let mut own_pitch: Option<f32> = None;
@@ -463,17 +468,29 @@ pub fn run(args: Args) -> Result<()> {
             && cached_addrs.iter().any(|&a| {
                 handle
                     .read::<sdk::SnapshotHeader>(a)
-                    .map(|h| looks_like_snapshot(&h))
+                    .map(|h| cache_still_valid(&h))
                     .unwrap_or(false)
             });
         if !cache_ok {
+            if last_scan.elapsed() < MIN_SCAN_GAP {
+                // Lost the snapshot but scanned very recently: keep the
+                // overlay alive (empty) instead of freezing stale boxes.
+                draw_frame(overlay, width, height, &[], menu_open, &items, selected, &settings, menu_key);
+                thread::sleep(Duration::from_millis(interval_ms));
+                continue;
+            }
+            last_scan = Instant::now();
             let fresh = locate_snapshot_addrs(&handle, start, end);
+            log_event(&started, &format!("snapshot cache invalid -> rescan found {} address(es)", fresh.len()));
             if fresh.is_empty() {
                 cached_addrs.clear();
+                draw_frame(overlay, width, height, &[], menu_open, &items, selected, &settings, menu_key);
                 thread::sleep(Duration::from_millis(interval_ms));
                 continue;
             }
             cached_addrs = fresh;
+            tracks.clear();
+            last_server_time = i32::MIN;
         }
 
         let snap_addr = cached_addrs
@@ -499,14 +516,29 @@ pub fn run(args: Args) -> Result<()> {
         if snap.header.server_time != last_seen_server_time {
             last_seen_server_time = snap.header.server_time;
             last_change_wall = Instant::now();
-        } else if last_change_wall.elapsed() > STALL_RESCAN_AFTER {
+            stall_rescan_after = Duration::from_secs(3);
+        } else if last_change_wall.elapsed() > stall_rescan_after {
             // Frozen for too long to be a live match — either we
             // launched before joining one, or this is a false-positive
             // match on unrelated memory. Pay for a fresh scan now.
+            last_scan = Instant::now();
             let fresh = locate_snapshot_addrs(&handle, start, end);
+            let same = fresh == cached_addrs;
+            log_event(
+                &started,
+                &format!(
+                    "server_time frozen at {} for {:.0}s -> rescan ({})",
+                    snap.header.server_time,
+                    stall_rescan_after.as_secs_f32(),
+                    if fresh.is_empty() { "nothing found" } else if same { "same address" } else { "address changed" }
+                ),
+            );
             if !fresh.is_empty() {
                 cached_addrs = fresh;
             }
+            // Paused game / console / intermission legitimately freezes
+            // server_time: back off so we don't rescan every 3 seconds.
+            stall_rescan_after = (stall_rescan_after * 2).min(MAX_STALL_BACKOFF);
             last_change_wall = Instant::now();
             thread::sleep(Duration::from_millis(interval_ms));
             continue;
@@ -541,11 +573,21 @@ pub fn run(args: Args) -> Result<()> {
                 seen.insert(es.client_num);
                 let new_pos = es.pos.tr_base;
                 let vel = match tracks.get(&es.client_num) {
-                    Some(prev) if last_server_time != i32::MIN && dt_server > 0.001 => Vec3::new(
-                        (new_pos.x - prev.pos.x) / dt_server,
-                        (new_pos.y - prev.pos.y) / dt_server,
-                        (new_pos.z - prev.pos.z) / dt_server,
-                    ),
+                    Some(prev) if last_server_time != i32::MIN && dt_server > 0.001 => {
+                        let v = Vec3::new(
+                            (new_pos.x - prev.pos.x) / dt_server,
+                            (new_pos.y - prev.pos.y) / dt_server,
+                            (new_pos.z - prev.pos.z) / dt_server,
+                        );
+                        // A respawn / teleport shows up as an absurd speed;
+                        // extrapolating it would fling the box across the
+                        // map until the next snapshot.
+                        if v.x * v.x + v.y * v.y + v.z * v.z > MAX_PLAUSIBLE_SPEED * MAX_PLAUSIBLE_SPEED {
+                            Vec3::ZERO
+                        } else {
+                            v
+                        }
+                    }
                     _ => Vec3::ZERO,
                 };
                 tracks.insert(
@@ -658,6 +700,15 @@ pub fn run(args: Args) -> Result<()> {
 
         thread::sleep(Duration::from_millis(interval_ms));
     }
+}
+
+/// Units per second above which a position jump is treated as a
+/// teleport/respawn rather than movement (rocket-jump speeds stay well
+/// below this).
+const MAX_PLAUSIBLE_SPEED: f32 = 2_500.0;
+
+fn log_event(started: &Instant, msg: &str) {
+    eprintln!("[{:7.1}s] {}", started.elapsed().as_secs_f32(), msg);
 }
 
 fn dist_sq(a: Vec3, b: Vec3) -> f32 {
@@ -829,6 +880,20 @@ fn find_snapshot_candidates(
     hits
 }
 
+/// Cheap check used to decide whether an *already located* snapshot is
+/// still alive. Deliberately much looser than `looks_like_snapshot`:
+/// dynamic fields (HP, weapon, pm_type, ping) take transient values
+/// while dead, spectating or respawning, and re-validating them was
+/// throwing a perfectly good address away.
+fn cache_still_valid(h: &sdk::SnapshotHeader) -> bool {
+    (1..=256).contains(&h.num_entities)
+        && h.server_time >= 1_000
+        && (0..64).contains(&h.ps.client_num)
+        && h.ps.origin.x.is_finite()
+        && h.ps.origin.y.is_finite()
+        && h.ps.origin.z.is_finite()
+}
+
 fn looks_like_snapshot(h: &sdk::SnapshotHeader) -> bool {
     if !(1..=256).contains(&h.num_entities) {
         return false;
@@ -856,7 +921,9 @@ fn looks_like_snapshot(h: &sdk::SnapshotHeader) -> bool {
         return false;
     }
     let hp = h.ps.stats[0];
-    if !(-50..=1_000).contains(&hp) {
+    // Gibbed players can go far below -50 HP; rejecting them made the
+    // whole tool lose the snapshot every time the local player died.
+    if !(-1_000..=1_000).contains(&hp) {
         return false;
     }
     true
